@@ -10,10 +10,11 @@ import LLMCore
 import OpenAI
 
 extension LLMClient {
-    public func chat(
+    public func chat<Metadata: ChatRequestMetadata>(
         model: SupportedModel,
         system: String? = nil,
-        text: String
+        text: String,
+        metadata: Metadata? = EmptyMetadata()
     ) async throws -> APIResponse<ChatMessageContent> {
         try await networking.post(
             "/chat",
@@ -25,40 +26,48 @@ extension LLMClient {
                     ]
                 ) + [
                     .init(role: .user, content: text)
-                ]
+                ],
+                metadata: metadata
             )
         )
     }
-    
-    public func chat(
+
+    public func chat<Metadata: ChatRequestMetadata>(
         model: SupportedModel,
-        messages: [ChatMessageContent]
+        messages: [ChatMessageContent],
+        metadata: Metadata? = EmptyMetadata()
     ) async throws -> APIResponse<ChatMessageContent> {
         try await networking.post(
             "/chat",
-            body: ChatRequest(model: model, messages: messages)
+            body: ChatRequest(model: model, messages: messages, metadata: metadata)
         )
     }
-    
-    public func streamChat(
+
+    public func streamChat<Metadata: ChatRequestMetadata>(
         model: SupportedModel,
         system: String? = nil,
-        text: String
+        text: String,
+        metadata: Metadata? = EmptyMetadata()
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
-        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: (
-            system == nil ? [] : [
-                .init(role: .system, content: system!),
-            ]
-        ) + [
-            .init(role: .user, content: text)
-        ]))
+        try await networking.stream("/chat/stream", body: ChatRequest(
+            model: model,
+            messages: (
+                system == nil ? [] : [
+                    .init(role: .system, content: system!),
+                ]
+            ) + [
+                .init(role: .user, content: text)
+            ],
+            metadata: metadata
+        ))
     }
-    
-    public func streamChat(
+
+    public func streamChat<Metadata: ChatRequestMetadata>(
         model: SupportedModel,
-        messages: [ChatMessageContent]
+        messages: [ChatMessageContent],
+        metadata: Metadata? = EmptyMetadata()
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
-        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: messages))
+        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: messages, metadata: metadata))
     }
     
 //    public func streamChat(

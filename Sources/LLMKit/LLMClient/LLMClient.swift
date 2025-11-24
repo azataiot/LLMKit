@@ -137,11 +137,11 @@ public final class LLMClient: Sendable {
     ///   - page: Page number (default: 1)
     ///   - pageSize: Number of transactions per page (default: 20)
     ///   - type: Optional filter by transaction type
-    public func getTransactionHistory(
+    public func getTransactionHistory<Metadata: CreditTransactionMetadata>(
         page: Int = 1,
         pageSize: Int = 20,
         type: CreditsTransactionType? = nil
-    ) async throws -> TransactionHistory {
+    ) async throws -> TransactionHistory<Metadata> {
         var queryParams: [String: String] = [
             "page": String(page),
             "pageSize": String(pageSize)
@@ -154,7 +154,7 @@ public final class LLMClient: Sendable {
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: "&")
 
-        let response: TransactionHistory = try await self.networking.get("/credits/transactions?\(queryString)")
+        let response: TransactionHistory<Metadata> = try await self.networking.get("/credits/transactions?\(queryString)")
         return response
     }
     
