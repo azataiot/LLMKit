@@ -1,0 +1,132 @@
+{
+  "originHash" : "83b03d733ff8a2146cbe8c963ca31cb5ff534b0e145d149454439aa50ecc652b",
+  "pins" : [
+    {
+      "identity" : "alerttoast",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/elai950/AlertToast.git",
+      "state" : {
+        "branch" : "master",
+        "revision" : "76a1c1793cd3443001c20c6033beb84453b25d9f"
+      }
+    },
+    {
+      "identity" : "chocofordkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/chocoford/ChocofordKit.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "475aafeb4e5267ad5435294507871511e304f6e9"
+      }
+    },
+    {
+      "identity" : "kingfisher",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/onevcat/Kingfisher.git",
+      "state" : {
+        "revision" : "4d75de347da985a70c63af4d799ed482021f6733",
+        "version" : "8.6.1"
+      }
+    },
+    {
+      "identity" : "llmcore",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/chocoford/LLMCore.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "f976d15910165365805ce1a5d90a1e9303102258"
+      }
+    },
+    {
+      "identity" : "openai",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/MacPaw/OpenAI.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "28884fcfb15946b119b6eb3498e5a900c1d8d595"
+      }
+    },
+    {
+      "identity" : "sfsafesymbols",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SFSafeSymbols/SFSafeSymbols.git",
+      "state" : {
+        "revision" : "3dd282d3269b061853a3b3bcd23a509d2aa166ce",
+        "version" : "6.2.0"
+      }
+    },
+    {
+      "identity" : "shapebuilder",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ohitsdaniel/ShapeBuilder.git",
+      "state" : {
+        "revision" : "39f80d64136d90faf85956bf876967242b0f4663",
+        "version" : "0.1.1"
+      }
+    },
+    {
+      "identity" : "splitview",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/stevengharris/SplitView.git",
+      "state" : {
+        "revision" : "7737a80740919c2fa94a6e64f870d37ef77b9b5f",
+        "version" : "3.5.3"
+      }
+    },
+    {
+      "identity" : "swift-http-types",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-http-types",
+      "state" : {
+        "revision" : "45eb0224913ea070ec4fba17291b9e7ecf4749ca",
+        "version" : "1.5.1"
+      }
+    },
+    {
+      "identity" : "swift-log",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-log.git",
+      "state" : {
+        "revision" : "ce592ae52f982c847a4efc0dd881cc9eb32d29f2",
+        "version" : "1.6.4"
+      }
+    },
+    {
+      "identity" : "swift-openapi-runtime",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-openapi-runtime",
+      "state" : {
+        "revision" : "7722cf8eac05c1f1b5b05895b04cfcc29576d9be",
+        "version" : "1.8.3"
+      }
+    },
+    {
+      "identity" : "swiftui-introspect",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/siteline/swiftui-introspect",
+      "state" : {
+        "revision" : "9bedf1e79c7b7c34b35b74bef126f56d2400ef7f",
+        "version" : "1.4.0-beta.4"
+      }
+    },
+    {
+      "identity" : "swiftui-shimmer",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/markiv/SwiftUI-Shimmer.git",
+      "state" : {
+        "revision" : "0226e21f9bf355d40e07e5f5e1c33679d50e167f",
+        "version" : "1.5.1"
+      }
+    },
+    {
+      "identity" : "swiftyalert",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/chocoford/SwiftyAlert.git",
+      "state" : {
+        "branch" : "dev",
+        "revision" : "a079333861f767e14f6d32d8eb7110dcaee2db5d"
+      }
+    }
+  ],
+  "version" : 3
+}

@@ -12,6 +12,7 @@ import Logging
 private struct EmptyBody: Encodable {}
 
 public actor LLMNetworking {
+    private let id = UUID()
     private let baseURL: URL
     private let session: URLSession
     private(set) var token: String?
@@ -28,6 +29,12 @@ public actor LLMNetworking {
 //#endif
         self.session = session
     }
+    
+    let jsonDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
 
     // 设置 / 更新 token（由 AuthManager 调用）
     public func setToken(_ token: String?) {
@@ -42,7 +49,7 @@ public actor LLMNetworking {
         let request = try makeRequest(endpoint: endpoint, method: "GET", body: body)
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
-        return try JSONDecoder().decode(T.self, from: data)
+        return try jsonDecoder.decode(T.self, from: data)
     }
 
     // POST 请求
@@ -53,14 +60,14 @@ public actor LLMNetworking {
         let request = try makeRequest(endpoint: endpoint, method: "POST", body: body)
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
-        return try JSONDecoder().decode(U.self, from: data)
+        return try jsonDecoder.decode(U.self, from: data)
     }
     
     // MARK: - 新增: 流式请求
-    public func stream<T: Encodable, R: Decodable & Sendable>(
+    public func stream<T: Encodable>(
         _ endpoint: String,
         body: T
-    ) throws -> AsyncThrowingStream<StreamChatResponse<R>, Error> {
+    ) throws -> AsyncThrowingStream<StreamChatResponse, Error> {
         let request = try makeRequest(endpoint: endpoint, method: "POST", body: body)
         
         return AsyncThrowingStream { continuation in
@@ -85,7 +92,7 @@ public actor LLMNetworking {
                             if !jsonPart.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                                 let data = jsonPart.data(using: .utf8) {
                                 do {
-                                    let decoded = try JSONDecoder().decode(StreamChatResponse<R>.self, from: data)
+                                    let decoded = try JSONDecoder().decode(StreamChatResponse.self, from: data)
                                     continuation.yield(decoded)
                                 } catch {
                                     print(error)
@@ -116,11 +123,11 @@ public actor LLMNetworking {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
+        // print("[LLMNetworking<\(id)>] makeRequest to:", url.absoluteString, "token: ", token)
         if let token {
             request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-
+        
         if let body = body {
             request.httpBody = try JSONEncoder().encode(body)
         }

@@ -10,14 +10,15 @@ import LLMCore
 
 public enum ConversationUpdateAction: Sendable {
     case insert(Conversation)
-    case update(Conversation.ID, ChatMessageUpdateActoin)
+    case update(Conversation.ID, ChatMessageUpdateAction)
     case delete(Conversation.ID)
 }
 
-public enum ChatMessageUpdateActoin: Sendable {
+public enum ChatMessageUpdateAction: Sendable {
+    case updateTitle(String)
     case insert([ChatMessage])
     case update(ChatMessage)
-    case delete(ChatMessage.ID)
+    case delete([ChatMessage.ID])
 }
 
 public protocol PersistenceProvider: Sendable {

@@ -125,35 +125,60 @@ public struct LLMClientProvider: ViewModifier {
         persistenceProvider: PersistenceProvider?,
         lagacy: Bool = false
     ) {
+        self.llmState = state
         self.llmClient = llmClient
         self.persistenceProvider = persistenceProvider
         self.lagacy = lagacy
     }
     
-    public static func lagacy(
-        state: LLMStateObject? = nil,
+    
+    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
+    public static func modern(
         llmClient: LLMClient,
         persistenceProvider: PersistenceProvider?
     ) -> LLMClientProvider {
         LLMClientProvider(
+            state: nil,
+            llmClient: llmClient,
+            persistenceProvider: persistenceProvider,
+            lagacy: false
+        )
+    }
+    
+    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
+    public static func modern(
+        state: LLMState,
+        llmClient: LLMClient,
+    ) -> LLMClientProvider {
+        LLMClientProvider(
             state: state,
+            llmClient: llmClient,
+            persistenceProvider: nil,
+            lagacy: false
+        )
+    }
+    
+    public static func lagacy(
+        llmClient: LLMClient,
+        persistenceProvider: PersistenceProvider?
+    ) -> LLMClientProvider {
+        LLMClientProvider(
+            state: nil,
             llmClient: llmClient,
             persistenceProvider: persistenceProvider,
             lagacy: true
         )
     }
     
-    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
-    public static func modern(
-        state: LLMState? = nil,
+    public static func lagacy(
+        state: LLMStateObject,
         llmClient: LLMClient,
-        persistenceProvider: PersistenceProvider?
     ) -> LLMClientProvider {
         LLMClientProvider(
             state: state,
             llmClient: llmClient,
-            persistenceProvider: persistenceProvider,
-            lagacy: false
+            persistenceProvider: nil,
+            lagacy: true
         )
     }
     
@@ -163,6 +188,7 @@ public struct LLMClientProvider: ViewModifier {
         if let llmState {
             content
                 .modifier(LLMClientProviderContent(llmClient: llmClient, state: llmState))
+                .withLLMStateEnvironment(llmState)
         } else {
             LLMStateProvider(
                 llmClient: llmClient,
@@ -188,17 +214,20 @@ struct LLMClientProviderContent: ViewModifier {
     func body(content: Content) -> some View {
         content
             .environment(\.llmClient, llmClient)
-            .onReceive(llmClient.creditsUpdatePublisher) { credits in
-                logger.info("Credits updated: \(credits)")
-                state.updateCredits(credits)
+            .onReceive(llmClient.creditsUpdatePublisher) { creditsInfo in
+                logger.info("Credits updated: \(creditsInfo.balance)")
+                state.updateCreditsInfo(creditsInfo)
             }
             .onReceive(llmClient.authStateChangedPublisher) { isAuthenticated in
                 state.isAuthenticated = isAuthenticated
             }
             .onReceive(refreshCreditsPassthrough.throttle(for: 30.0, scheduler: RunLoop.main, latest: true)) { _ in
                 Task {
-                    if let credits = try? await llmClient.getCredits() {
-                        state.updateCredits(credits)
+                    do {
+                        let creditsInfo = try await llmClient.getCredits()
+                        state.updateCreditsInfo(creditsInfo)
+                    } catch {
+                        print("Failed to refresh credits: \(error)")
                     }
                 }
             }
@@ -207,18 +236,76 @@ struct LLMClientProviderContent: ViewModifier {
                     refreshCreditsPassthrough.send()
                 }
             }
+            .onAppear {
+                refreshCreditsPassthrough.send()
+            }
     }
 }
 
 
 
 extension View {
-    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
-    public func llmProvider(state: LLMState? = nil, client: LLMClient, persistenceProvider: PersistenceProvider?) -> some View {
-        modifier(LLMClientProvider.modern(state: state, llmClient: client, persistenceProvider: persistenceProvider))
+    @MainActor @ViewBuilder
+    func withLLMStateEnvironment(_ state: any LLMStatable) -> some View {
+        if #available(macOS 14.0, iOS 17.0, *), let state = state as? LLMState {
+            environment(state)
+        } else if let state = state as? LLMStateObject {
+            environmentObject(state)
+        } else {
+            self
+        }
     }
-    public func llmProviderLagacy(state: LLMStateObject? = nil, client: LLMClient, persistenceProvider: PersistenceProvider?) -> some View {
-        modifier(LLMClientProvider.lagacy(state: state, llmClient: client, persistenceProvider: persistenceProvider))
+    
+    
+    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
+    @MainActor @ViewBuilder
+    public func llmProvider(
+        client: LLMClient,
+        persistenceProvider: PersistenceProvider?
+    ) -> some View {
+        modifier(
+            LLMClientProvider.modern(
+                llmClient: client,
+                persistenceProvider: persistenceProvider
+            )
+        )
+    }
+    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
+    @MainActor @ViewBuilder
+    public func llmProvider(
+        state: LLMState,
+        client: LLMClient,
+    ) -> some View {
+        modifier(
+            LLMClientProvider.modern(
+                state: state,
+                llmClient: client,
+            )
+        )
+    }
+    @MainActor @ViewBuilder
+    public func llmProviderLagacy(
+        client: LLMClient,
+        persistenceProvider: PersistenceProvider?
+    ) -> some View {
+        modifier(
+            LLMClientProvider.lagacy(
+                llmClient: client,
+                persistenceProvider: persistenceProvider
+            )
+        )
+    }
+    @MainActor @ViewBuilder
+    public func llmProviderLagacy(
+        state: LLMStateObject,
+        client: LLMClient,
+    ) -> some View {
+        modifier(
+            LLMClientProvider.lagacy(
+                state: state,
+                llmClient: client,
+            )
+        )
     }
 }
 

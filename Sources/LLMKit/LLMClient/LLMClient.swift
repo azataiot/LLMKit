@@ -15,7 +15,7 @@ public final class LLMClient: Sendable {
     internal let networking: LLMNetworking
     internal let uploader: (any LLMFileUploadProvider)?
     internal let uploadPolicy: LLMUploadPolicy?
-
+    
     private let logger = Logger(label: "LLMClient")
     
     public init(
@@ -88,18 +88,23 @@ public final class LLMClient: Sendable {
         }
     }
     
-    internal let creditsUpdatePublisher = PassthroughSubject<Double, Never>()
+    internal let creditsUpdatePublisher = PassthroughSubject<CreditsInfo, Never>()
     
     // MARK: - Private Request Helper
     
     private func withUsageMiddleware<T: Codable>(_ response: APIResponse<T>) -> APIResponse<T> {
         if let remainsCredit = response.credits?.remains {
-            // self.usageStreamContinuation.yield(usage)
+            // Create a minimal CreditsInfo with only balance
+            let creditsInfo = CreditsInfo(
+                balance: remainsCredit,
+                subscription: nil,
+                purchasedCredits: 0
+            )
             DispatchQueue.main.async {
-                self.creditsUpdatePublisher.send(remainsCredit)
+                self.creditsUpdatePublisher.send(creditsInfo)
             }
         }
-        
+
         return response
     }
     
@@ -111,30 +116,59 @@ public final class LLMClient: Sendable {
         let body = AskRequest(systemPrompt: systemPrompt, userPrompt: userPrompt, model: model)
         let data: String = try await self.networking.post("/chat/ask", body: body)
         
-//        let result = String(data: data, encoding: .utf8)
+        //        let result = String(data: data, encoding: .utf8)
         return data
     }
     
     // MARK: - Credits
+    /// Get credits information including balance, subscription and purchased credits
     @discardableResult
-    public func getCredits() async throws -> Double {
-        let response: CreditAddResponse = try await self.networking.get("/credits")
-        print(response)
-        let balance = response.balance
+    public func getCredits() async throws -> CreditsInfo {
+        let response: CreditsInfo = try await self.networking.get("/credits")
         // 更新全局状态
         DispatchQueue.main.async {
-            self.creditsUpdatePublisher.send(balance)
+            self.creditsUpdatePublisher.send(response)
         }
-        return balance
+        return response
+    }
+    
+    /// Get transaction history with pagination
+    /// - Parameters:
+    ///   - page: Page number (default: 1)
+    ///   - pageSize: Number of transactions per page (default: 20)
+    ///   - type: Optional filter by transaction type
+    public func getTransactionHistory(
+        page: Int = 1,
+        pageSize: Int = 20,
+        type: CreditsTransactionType? = nil
+    ) async throws -> TransactionHistory {
+        var queryParams: [String: String] = [
+            "page": String(page),
+            "pageSize": String(pageSize)
+        ]
+        if let type = type {
+            queryParams["type"] = type.rawValue
+        }
+
+        let queryString = queryParams
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "&")
+
+        let response: TransactionHistory = try await self.networking.get("/credits/transactions?\(queryString)")
+        return response
     }
     
     @discardableResult
     public func addCredits(transactionSignedData: String) async throws -> Double {
         let balance = try await self.authManager.purchaseCompleted(jws: transactionSignedData)
-        
+
         // 更新全局状态
         DispatchQueue.main.async {
-            self.creditsUpdatePublisher.send(balance)
+            self.creditsUpdatePublisher.send(CreditsInfo(
+                balance: balance,
+                subscription: nil,
+                purchasedCredits: 0
+            ))
         }
         return balance
     }
