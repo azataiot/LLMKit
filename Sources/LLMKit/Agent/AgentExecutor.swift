@@ -59,11 +59,12 @@ public class AgentExecutor {
     }
     
     /// Execute agent based on conversation configuration
-    public func execute(
+    public func execute<Metadata: Codable & Equatable & Sendable>(
         conversation: Conversation,
         userMessage: ChatMessage,
         model: SupportedModel,
         stream: Bool = true,
+        metadata: Metadata = EmptyMetadata(),
         onStep: @escaping (AgentStep) async -> Void
     ) async throws -> ChatMessage {
         let config = conversation.agentConfig
@@ -94,6 +95,14 @@ public class AgentExecutor {
             thoughtCount += 1
             logger.debug("Thought \(thoughtCount)/\(config.maxThoughts)")
 
+            let metadata = ChatRequestMetadata(
+                userInfo: metadata,
+                context: ChatRequestInternalMetadata(
+                    conversationID: conversation.id,
+                    agentStep: thoughtCount
+                )
+            )
+            
             // Step 1: Get thought response from LLM
             let thoughtMessage = try await requestThought(
                 model: model,
@@ -101,6 +110,7 @@ public class AgentExecutor {
                 stream: stream && canStream,
                 thoughtNumber: thoughtCount,
                 config: config,
+                metadata: metadata,
                 onStep: onStep
             )
 
@@ -227,19 +237,21 @@ public class AgentExecutor {
     }
     
     /// Request a thought step from LLM
-    private func requestThought(
+    private func requestThought<Metadata: Codable & Equatable & Sendable>(
         model: SupportedModel,
         context: [ChatMessageContent],
         stream: Bool,
         thoughtNumber: Int,
         config: AgentConfig,
+        metadata: Metadata?,
         onStep: @escaping (AgentStep) async -> Void
     ) async throws -> ChatMessageContent {
         if stream {
             // Streaming mode
             let stream = try await llmClient.streamChat(
                 model: model,
-                messages: context
+                messages: context,
+                metadata: metadata
             )
 
             var accumulatedMessage: ChatMessageContent?
@@ -294,7 +306,8 @@ public class AgentExecutor {
             // Non-streaming mode
             let result = try await llmClient.chat(
                 model: model,
-                messages: context
+                messages: context,
+                metadata: metadata
             )
 
             guard let message = result.data else {
