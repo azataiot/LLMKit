@@ -60,8 +60,8 @@ protocol LLMStatable: AnyObject {
         model: SupportedModel,
         messages: [ChatMessage],
         stream: Bool,
-        onUpdate: @escaping (_ message: ChatMessage) async throws -> Void,
-        onFirstReply: @escaping (_ message: ChatMessage) async throws -> Void,
+        onUpdate: @escaping @Sendable (_ message: ChatMessage) async throws -> Void,
+        onFirstReply: @escaping @Sendable (_ message: ChatMessage) async throws -> Void,
     ) async throws -> ChatMessage
 
     func refreshConversations() async
@@ -364,14 +364,15 @@ extension LLMStatable {
             logger.info("Sending message end")
 
             let conversation = self.conversations.value![index]
-            let executor = AgentExecutor(llmClient: llmClient, toolRegistry: toolRegistry)
+            let executor = AgentExecutor(llmProvider: llmClient, toolRegistry: toolRegistry)
 
 
             // Use AgentExecutor for all interactions (handles both direct chat and agent steps)
             // Execute returns a stream now
             let responseStream = try await executor.execute(
-                conversation: conversation,
-                userMessage: message,
+                conversationID: conversation.id,
+                agentConfig: conversation.agentConfig,
+                contextMessages: conversation.messages.contentMessages,
                 model: model,
                 metadata: metadata
             ) { (stepData: AgentStep) in

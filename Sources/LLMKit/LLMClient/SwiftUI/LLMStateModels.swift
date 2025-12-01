@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import LLMCore
 
 public enum ConversationPhase: String, Codable, Sendable {
     case idle

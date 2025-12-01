@@ -9,40 +9,6 @@ import Foundation
 import LLMCore
 import OpenAI
 
-public struct EmptyMetadata: ContentModel {
-    public init() {}
-}
-
-public struct ChatRequestInternalMetadata: ContentModel {
-    public var conversationID: String
-    public var agentStep: Int
-    
-    public init(conversationID: String, agentStep: Int) {
-        self.conversationID = conversationID
-        self.agentStep = agentStep
-    }
-}
-
-public struct ChatRequestMetadata<T: ContentModel>: ContentModel {
-    public var id = UUID().uuidString
-    public var date = Date()
-    
-    public var userInfo: T
-    public var context: ChatRequestInternalMetadata?
-    
-    public init(
-        userInfo: T,
-        context: ChatRequestInternalMetadata
-    ) {
-        self.userInfo = userInfo
-        self.context = context
-    }
-    
-    public init() where T == EmptyMetadata {
-        self.userInfo = EmptyMetadata()
-        self.context = nil
-    }
-}
 
 extension LLMClient {
     public func chat<Metadata: Codable & Equatable & Sendable>(
