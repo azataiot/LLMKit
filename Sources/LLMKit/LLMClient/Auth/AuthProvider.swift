@@ -16,7 +16,7 @@ public protocol LLMAuthProvider: Sendable {
     func restoreAuth(groupID: String) async throws -> String
 
     /// 处理一次购买完成后的授权逻辑
-    func handlePurchase(transactionJWS: String) async throws -> CreditAddResponse
+    func handlePurchase(transactionJWS: String) async throws -> CreditsInfo
 }
 
 public protocol LLMAuthProviderBuilder: Sendable {
@@ -34,7 +34,7 @@ struct NoAuthProvider: LLMAuthProvider {
         ""
     }
     
-    func handlePurchase(transactionJWS: String) async throws -> CreditAddResponse {
-        return .init(balance: 0)
+    func handlePurchase(transactionJWS: String) async throws -> CreditsInfo {
+        return .init(balance: 0, purchasedCredits: 0)
     }
 }

@@ -11,6 +11,7 @@ import SwiftUI
 import ChocofordEssentials
 import LLMCore
 import Logging
+import StoreKit
 
 @MainActor
 public final class LLMStateObject: ObservableObject, LLMStatable {
@@ -36,6 +37,11 @@ public final class LLMStateObject: ObservableObject, LLMStatable {
         creditsInfo?.balance ?? 0
     }
 
+    // @discardableResult
+    public func handlePurchase(verificationResult: VerificationResult<StoreKit.Transaction>) async throws {
+        try await self._handlePurchase(verificationResult: verificationResult)
+    }
+    
     public func configurePersistenceProvider(_ provider: PersistenceProvider) {
         self._configurePersistenceProvider(provider)
     }
@@ -148,6 +154,11 @@ public final class LLMState: LLMStatable {
     /// Computed property for backward compatibility
     public var credits: Double {
         creditsInfo?.balance ?? 0
+    }
+    
+    // @discardableResult
+    public func handlePurchase(verificationResult: VerificationResult<StoreKit.Transaction>) async throws {
+        try await self._handlePurchase(verificationResult: verificationResult)
     }
     
     public func configurePersistenceProvider(_ provider: PersistenceProvider) {

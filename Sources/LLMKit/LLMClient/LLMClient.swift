@@ -159,17 +159,13 @@ public final class LLMClient: Sendable {
     }
     
     @discardableResult
-    public func addCredits(transactionSignedData: String) async throws -> Double {
-        let balance = try await self.authManager.purchaseCompleted(jws: transactionSignedData)
+    public func addCredits(transactionSignedData: String) async throws -> CreditsInfo {
+        let creditsInfo = try await self.authManager.purchaseCompleted(jws: transactionSignedData)
 
         // 更新全局状态
         DispatchQueue.main.async {
-            self.creditsUpdatePublisher.send(CreditsInfo(
-                balance: balance,
-                subscription: nil,
-                purchasedCredits: 0
-            ))
+            self.creditsUpdatePublisher.send(creditsInfo)
         }
-        return balance
+        return creditsInfo
     }
 }

@@ -59,184 +59,249 @@ public class AgentExecutor {
     }
     
     /// Execute agent based on conversation configuration
+    /// Returns a stream of chat messages (always streaming, even if model doesn't support it)
     public func execute<Metadata: Codable & Equatable & Sendable>(
         conversation: Conversation,
         userMessage: ChatMessage,
         model: SupportedModel,
-        stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
         onStep: @escaping (AgentStep) async -> Void
-    ) async throws -> ChatMessage {
+    ) async throws -> AsyncThrowingStream<ChatMessage, Error> {
         let config = conversation.agentConfig
         let tools = await toolRegistry.get(config.tools)
         let canStream = model.supportsStreaming
 
         logger.info("""
-                    ==== Executing agent ====
-                    - conversationID: \(conversation.id)
-                    - steps: \(config.allowedSteps)
-                    - tools: \(config.tools) (\(tools.count) loaded)
-                    - maxThoughts: \(config.maxThoughts)
-                    - stream: \(stream && canStream)
-                    ==== Executing agent end ====
-                    """)
+            ==== Executing agent ====
+            - conversationID: \(conversation.id)
+            - steps: \(config.allowedSteps)
+            - tools: \(config.tools) (\(tools.count) loaded)
+            - maxThoughts: \(config.maxThoughts)
+            - canStream: \(canStream)
+            ==== Executing agent end ====
+            """)
 
-        var context = conversation.messages.contentMessages
-        logger.info("Context messages count: \(context.count)")
-        for (index, msg) in context.enumerated() {
-            logger.info("  [\(index)] role: \(msg.role), content: \(msg.content?.prefix(50) ?? "nil")...")
-        }
-
-        var thoughtCount = 0
-        var accumulatedFiles: [ChatMessageContent.File] = []  // Track files from streaming responses
-
-        // Main thought loop - every iteration starts with a thought
-        while thoughtCount < config.maxThoughts {
-            thoughtCount += 1
-            logger.debug("Thought \(thoughtCount)/\(config.maxThoughts)")
-
-            let metadata = ChatRequestMetadata(
-                userInfo: metadata,
-                context: ChatRequestInternalMetadata(
-                    conversationID: conversation.id,
-                    agentStep: thoughtCount
-                )
-            )
-            
-            // Step 1: Get thought response from LLM
-            let thoughtMessage = try await requestThought(
-                model: model,
-                context: context,
-                stream: stream && canStream,
-                thoughtNumber: thoughtCount,
-                config: config,
-                metadata: metadata,
-                onStep: onStep
-            )
-
-            // Accumulate files from this thought
-            if let files = thoughtMessage.files {
-                accumulatedFiles.append(contentsOf: files)
-            }
-
-            let thoughtContent = thoughtMessage.content ?? ""
-
-            // Step 2: Parse the thought response
-            logger.debug("Thought content (first 200 chars): \(thoughtContent.prefix(200))")
-            let response = parseThoughtResponse(thoughtContent, config: config)
-
-            // Step 3: Handle the response with switch
-            switch response {
-                case .finalAnswer(let answer):
-                    // Found final answer - return directly
-                    logger.info("Agent completed with final answer after \(thoughtCount) thought(s)")
-                    return .content(ChatMessageContent(
-                        role: .assistant,
-                        content: answer,
-                        files: accumulatedFiles
-                    ))
-                    
-                case .nextStep(let stepType, let stepContent):
-                    // Execute the next step based on type
-                    logger.debug("Next step: \(stepType)")
-                    // Handle step execution based on type
-                    switch stepType {
-                        case .action:
-                            // Action requires tool execution
-                            guard case .toolCall(let toolCall) = stepContent else {
-                                throw AgentError.invalidToolCall("Invalid action content")
-                            }
-                            
-                            // Emit action step
-                            let actionStep = AgentStep(
-                                stepNumber: thoughtCount,
-                                type: .action,
-                                content: "Action: \(toolCall.tool)\nInput: \(toolCall.input)"
-                            )
-                            await onStep(actionStep)
-                            
-                            // Execute tool
-                            guard let tool = tools.first(where: { $0.name == toolCall.tool }) else {
-                                throw AgentError.toolNotFound(toolCall.tool)
-                            }
-                            
-                            do {
-                                let observation = try await tool.execute(toolCall.input)
-                                logger.debug("Tool execution result: \(observation.prefix(100))...")
-                                
-                                // Emit observation (action needs observation)
-                                await emitObservation(
-                                    stepNumber: thoughtCount,
-                                    content: "Observation: \(observation)",
-                                    onStep: onStep
-                                )
-                                
-                                // Add thought and observation to context
-                                context.append(ChatMessageContent(role: .assistant, content: thoughtContent))
-                                context.append(ChatMessageContent(role: .system, content: "Observation: \(observation)"))
-                                
-                            } catch {
-                                let errorMsg = "Tool execution failed: \(error.localizedDescription)"
-                                logger.error("\(errorMsg)")
-                                
-                                // Emit error observation
-                                await emitObservation(
-                                    stepNumber: thoughtCount,
-                                    content: "Error: \(errorMsg)",
-                                    onStep: onStep
-                                )
-                                
-                                context.append(ChatMessageContent(role: .assistant, content: thoughtContent))
-                                // Add error to context
-                                context.append(ChatMessageContent(role: .system, content: errorMsg))
-                            }
-                            
-                        case .plan, .reflection:
-                            // Simple steps that don't need async execution
-                            guard case .text(let textContent) = stepContent else {
-                                throw AgentError.invalidToolCall("Invalid \(stepType) content")
-                            }
-                            
-                            // Emit step
-                            let step = AgentStep(
-                                stepNumber: thoughtCount,
-                                type: stepType == .plan ? .plan : .reflection,
-                                content: textContent
-                            )
-                            await onStep(step)
-                            
-                            // Add thought and step to context
-                            context.append(ChatMessageContent(role: .assistant, content: thoughtContent))
-                            
-                            let stepPrefix = stepType == .plan ? "Plan:" : "Reflection:"
-                            context.append(ChatMessageContent(
-                                role: .assistant,
-                                content: "\(stepPrefix) \(textContent)"
-                            ))
-                            
-                        case .thought:
-                            // Thought should not appear as nextStep
-                            throw AgentError.invalidToolCall("Thought cannot be a next step")
+        // Wrap the agent loop in an AsyncThrowingStream
+        return AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    var context = conversation.messages.contentMessages
+                    logger.info("Context messages count: \(context.count)")
+                    for (index, msg) in context.enumerated() {
+                        logger.info("[\(index)] role: \(msg.role), content: \(msg.content?.prefix(50) ?? "nil")...")
                     }
-                    // Continue to next thought
-                    continue
-                    
-                case .unknown(let content):
-                    // No specific action detected - return as final answer
-                    logger.info("No specific action detected after \(thoughtCount) thought(s), treating as final answer")
-                    logger.debug("Content: \(content.prefix(200))")
-                    return .content(ChatMessageContent(
-                        role: .assistant,
-                        content: content,
-                        files: accumulatedFiles
-                    ))
+
+                    var thoughtCount = 0
+                    var accumulatedFiles: [ChatMessageContent.File] = []  // Track files from streaming responses
+                    var lastUsage: CreditsResult?  // Track usage from the last thought
+
+                    // Main thought loop - every iteration starts with a thought
+                    while thoughtCount < config.maxThoughts {
+                        thoughtCount += 1
+                        logger.debug("Thought \(thoughtCount)/\(config.maxThoughts)")
+
+                        let requestMetadata = ChatRequestMetadata(
+                            userInfo: metadata,
+                            context: ChatRequestInternalMetadata(
+                                conversationID: conversation.id,
+                                agentStep: thoughtCount
+                            )
+                        )
+
+                        // Step 1: Get thought response from LLM (as stream)
+                        let thoughtStream = try await requestThought(
+                            model: model,
+                            context: context,
+                            stream: canStream,
+                            thoughtNumber: thoughtCount,
+                            config: config,
+                            metadata: requestMetadata,
+                            onStep: onStep
+                        )
+
+                        // Consume the stream and check if it's a final answer
+                        var thoughtMessage: ChatMessageContent?
+                        var isFinalAnswer = false
+
+                        for try await chunk in thoughtStream {
+                            thoughtMessage = chunk
+
+                            // Check if this chunk contains a final answer
+                            if let content = chunk.content, !isFinalAnswer {
+                                if parseFinalAnswer(from: content) != nil {
+                                    isFinalAnswer = true
+                                }
+                            }
+
+                            // If it's a final answer, yield the chunk with "Final Answer:" prefix removed
+                            if isFinalAnswer {
+                                if let answer = parseFinalAnswer(from: chunk.content ?? "") {
+                                    // Create a new chunk with only the answer content
+                                    let answerChunk = ChatMessageContent(
+                                        id: chunk.id,
+                                        role: chunk.role,
+                                        content: answer,
+                                        files: chunk.files ?? [],
+                                        usage: chunk.usage
+                                    )
+                                    continuation.yield(.content(answerChunk))
+                                }
+                            }
+                        }
+
+                        guard let finalMessage = thoughtMessage else {
+                            throw AgentError.toolExecutionFailed("No response from LLM")
+                        }
+
+                        // If it was a final answer, stream is done, finish
+                        if isFinalAnswer {
+                            continuation.finish()
+                            return
+                        }
+
+                        // Accumulate files and usage from this thought
+                        if let files = finalMessage.files {
+                            accumulatedFiles.append(contentsOf: files)
+                        }
+                        if let usage = finalMessage.usage {
+                            lastUsage = usage
+                        }
+
+                        let thoughtContent = finalMessage.content ?? ""
+
+                        // Step 2: Parse the thought response
+                        logger.debug("Thought content (first 200 chars): \(thoughtContent.prefix(200))")
+                        let response = parseThoughtResponse(thoughtContent, config: config)
+
+                        // Step 3: Handle the response with switch (only if not already handled as final answer)
+                        switch response {
+                            case .finalAnswer(let answer):
+                                // This case is actually already handled above when we detected final answer during streaming
+                                // But if somehow we reach here (e.g., non-streaming mode), handle it
+                                if !isFinalAnswer {
+                                    logger.info("Agent completed with final answer after \(thoughtCount) thought(s)")
+                                    continuation.yield(.content(ChatMessageContent(
+                                        role: .assistant,
+                                        content: answer,
+                                        files: accumulatedFiles,
+                                        usage: lastUsage
+                                    )))
+                                }
+                                continuation.finish()
+                                return
+
+                            case .nextStep(let stepType, let stepContent):
+                                // Execute the next step based on type
+                                logger.debug("Next step: \(stepType)")
+                                // Handle step execution based on type
+                                switch stepType {
+                                    case .action:
+                                        // Action requires tool execution
+                                        guard case .toolCall(let toolCall) = stepContent else {
+                                            throw AgentError.invalidToolCall("Invalid action content")
+                                        }
+
+                                        // Emit action step
+                                        let actionStep = AgentStep(
+                                            stepNumber: thoughtCount,
+                                            type: .action,
+                                            content: "Action: \(toolCall.tool)\nInput: \(toolCall.input)"
+                                        )
+                                        await onStep(actionStep)
+
+                                        // Execute tool
+                                        guard let tool = tools.first(where: { $0.name == toolCall.tool }) else {
+                                            throw AgentError.toolNotFound(toolCall.tool)
+                                        }
+
+                                        do {
+                                            let observation = try await tool.execute(toolCall.input)
+                                            logger.debug("Tool execution result: \(observation.prefix(100))...")
+
+                                            // Emit observation (action needs observation)
+                                            await emitObservation(
+                                                stepNumber: thoughtCount,
+                                                content: "Observation: \(observation)",
+                                                onStep: onStep
+                                            )
+
+                                            // Add thought and observation to context
+                                            context.append(ChatMessageContent(role: .assistant, content: thoughtContent))
+                                            context.append(ChatMessageContent(role: .system, content: "Observation: \(observation)"))
+
+                                        } catch {
+                                            let errorMsg = "Tool execution failed: \(error.localizedDescription)"
+                                            logger.error("\(errorMsg)")
+
+                                            // Emit error observation
+                                            await emitObservation(
+                                                stepNumber: thoughtCount,
+                                                content: "Error: \(errorMsg)",
+                                                onStep: onStep
+                                            )
+
+                                            context.append(ChatMessageContent(role: .assistant, content: thoughtContent))
+                                            // Add error to context
+                                            context.append(ChatMessageContent(role: .system, content: errorMsg))
+                                        }
+
+                                    case .plan, .reflection:
+                                        // Simple steps that don't need async execution
+                                        guard case .text(let textContent) = stepContent else {
+                                            throw AgentError.invalidToolCall("Invalid \(stepType) content")
+                                        }
+
+                                        // Emit step
+                                        let step = AgentStep(
+                                            stepNumber: thoughtCount,
+                                            type: stepType == .plan ? .plan : .reflection,
+                                            content: textContent
+                                        )
+                                        await onStep(step)
+
+                                        // Add thought and step to context
+                                        context.append(ChatMessageContent(role: .assistant, content: thoughtContent))
+
+                                        let stepPrefix = stepType == .plan ? "Plan:" : "Reflection:"
+                                        context.append(ChatMessageContent(
+                                            role: .assistant,
+                                            content: "\(stepPrefix) \(textContent)"
+                                        ))
+
+                                    case .thought:
+                                        // Thought should not appear as nextStep
+                                        throw AgentError.invalidToolCall("Thought cannot be a next step")
+                                }
+                                // Continue to next thought
+                                continue
+
+                            case .unknown(let content):
+                                // No specific action detected - yield as final answer
+                                logger.info("No specific action detected after \(thoughtCount) thought(s), treating as final answer")
+                                logger.debug("Content: \(content.prefix(200))")
+                                if !isFinalAnswer {
+                                    continuation.yield(.content(ChatMessageContent(
+                                        role: .assistant,
+                                        content: content,
+                                        files: accumulatedFiles,
+                                        usage: lastUsage
+                                    )))
+                                }
+                                continuation.finish()
+                                return
+                        }
+                    }
+
+                    throw AgentError.maxThoughtsReached
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
         }
-        
-        throw AgentError.maxThoughtsReached
     }
     
     /// Request a thought step from LLM
+    /// Returns a stream of ChatMessageContent chunks (accumulating content over time)
     private func requestThought<Metadata: Codable & Equatable & Sendable>(
         model: SupportedModel,
         context: [ChatMessageContent],
@@ -245,93 +310,141 @@ public class AgentExecutor {
         config: AgentConfig,
         metadata: Metadata?,
         onStep: @escaping (AgentStep) async -> Void
-    ) async throws -> ChatMessageContent {
+    ) async throws -> AsyncThrowingStream<ChatMessageContent, Error> {
         if stream {
-            // Streaming mode
-            let stream = try await llmClient.streamChat(
-                model: model,
-                messages: context,
-                metadata: metadata
-            )
+            // Streaming mode - return a stream that yields accumulated chunks
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let responseStream: AsyncThrowingStream<StreamChatResponse, Error> = try await llmClient.streamChat(
+                            model: model,
+                            messages: context,
+                            metadata: metadata
+                        )
 
-            var accumulatedMessage: ChatMessageContent?
-            var streamStepId: UUID? = nil
+                        var accumulatedMessage: ChatMessageContent?
+                        var streamStepId: UUID? = nil
+                        var creditsResult: CreditsResult?
+                        var isFinalAnswer = false
 
-            for try await result in stream {
-                switch result {
-                    case .message(let chunk):
-                        if let existing = accumulatedMessage {
-                            // Accumulate content and files
-                            let newContent = (existing.content ?? "") + (chunk.content ?? "")
-                            let newFiles = (existing.files ?? []) + (chunk.files ?? [])
-                            accumulatedMessage = ChatMessageContent(
-                                id: existing.id,
-                                role: existing.role,
-                                content: newContent,
-                                files: newFiles
-                            )
-                        } else {
-                            // First chunk
-                            accumulatedMessage = chunk
-                        }
+                        for try await result in responseStream {
+                            switch result {
+                                case .message(let chunk):
+                                    if let existing = accumulatedMessage {
+                                        // Accumulate content and files
+                                        let newContent = (existing.content ?? "") + (chunk.content ?? "")
+                                        let newFiles = (existing.files ?? []) + (chunk.files ?? [])
+                                        accumulatedMessage = ChatMessageContent(
+                                            id: existing.id,
+                                            role: existing.role,
+                                            content: newContent,
+                                            files: newFiles,
+                                            usage: creditsResult
+                                        )
+                                    } else {
+                                        // First chunk
+                                        accumulatedMessage = ChatMessageContent(
+                                            id: chunk.id,
+                                            role: chunk.role,
+                                            content: chunk.content,
+                                            files: chunk.files ?? [],
+                                            usage: creditsResult
+                                        )
+                                    }
 
-                        // Emit/update thought step in real-time
-                        if config.allowedSteps.contains(.thought), let content = accumulatedMessage?.content {
-                            // Truncate thought content at first action keyword to avoid duplication
-                            let thoughtContent = truncateAtActionKeyword(content)
+                                    guard let message = accumulatedMessage, let content = message.content else { continue }
 
-                            let thoughtStep = AgentStep(
-                                id: streamStepId ?? UUID(),
-                                stepNumber: thoughtNumber,
-                                type: .thought,
-                                content: thoughtContent
-                            )
-                            if streamStepId == nil {
-                                streamStepId = thoughtStep.id
+                                    // Check if this is a final answer
+                                    if !isFinalAnswer && parseFinalAnswer(from: content) != nil {
+                                        isFinalAnswer = true
+                                        // Send final thought step before final answer (truncated)
+                                        let thoughtContent = truncateAtActionKeyword(content)
+                                        if !thoughtContent.isEmpty {
+                                            let thoughtStep = AgentStep(
+                                                id: streamStepId ?? UUID(),
+                                                stepNumber: thoughtNumber,
+                                                type: .thought,
+                                                content: thoughtContent
+                                            )
+                                            await onStep(thoughtStep)
+                                        }
+                                        // Don't emit any more thought steps after this
+                                    }
+
+                                    // Emit/update thought step in real-time (only if not final answer)
+                                    if !isFinalAnswer {
+                                        // Truncate thought content at first action keyword to avoid duplication
+                                        let thoughtContent = truncateAtActionKeyword(content)
+
+                                        let thoughtStep = AgentStep(
+                                            id: streamStepId ?? UUID(),
+                                            stepNumber: thoughtNumber,
+                                            type: .thought,
+                                            content: thoughtContent
+                                        )
+                                        if streamStepId == nil {
+                                            streamStepId = thoughtStep.id
+                                        }
+                                        await onStep(thoughtStep)
+                                    }
+
+                                    // Yield the accumulated message
+                                    continuation.yield(message)
+
+                                case .settlement(let credits):
+                                    creditsResult = credits
+                                    // Update accumulated message with usage
+                                    if var message = accumulatedMessage {
+                                        message.usage = credits
+                                        accumulatedMessage = message
+                                        continuation.yield(message)
+                                    }
                             }
-                            await onStep(thoughtStep)
                         }
 
-                    case .settlement(_):
-                        break
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
-
-            guard let message = accumulatedMessage, let content = message.content, !content.isEmpty else {
-                throw AgentError.toolExecutionFailed("No response from LLM")
-            }
-
-            return message
         } else {
-            // Non-streaming mode
-            let result = try await llmClient.chat(
-                model: model,
-                messages: context,
-                metadata: metadata
-            )
+            // Non-streaming mode - return a stream that yields once
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let result = try await llmClient.chat(
+                            model: model,
+                            messages: context,
+                            metadata: metadata
+                        )
 
-            guard let message = result.data else {
-                if let error = result.error {
-                    throw AgentError.toolExecutionFailed(error.message)
+                        guard let message = result.data else {
+                            if let error = result.error {
+                                throw AgentError.toolExecutionFailed(error.message)
+                            }
+                            throw AgentError.toolExecutionFailed("No response from LLM")
+                        }
+
+                        guard let content = message.content, !content.isEmpty else {
+                            throw AgentError.toolExecutionFailed("Empty response from LLM")
+                        }
+
+                        // Always emit thought step for non-streaming mode
+                        let thoughtStep = AgentStep(
+                            stepNumber: thoughtNumber,
+                            type: .thought,
+                            content: content
+                        )
+                        await onStep(thoughtStep)
+
+                        continuation.yield(message)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
                 }
-                throw AgentError.toolExecutionFailed("No response from LLM")
             }
-
-            guard let content = message.content, !content.isEmpty else {
-                throw AgentError.toolExecutionFailed("Empty response from LLM")
-            }
-
-            // Emit thought step
-            if config.allowedSteps.contains(.thought) {
-                let thoughtStep = AgentStep(
-                    stepNumber: thoughtNumber,
-                    type: .thought,
-                    content: content
-                )
-                await onStep(thoughtStep)
-            }
-
-            return message
         }
     }
     
@@ -372,25 +485,28 @@ public class AgentExecutor {
     }
     
     /// Parse thought response to determine next action
+    /// Always tries to parse all possible formats based on actual content
     private func parseThoughtResponse(_ text: String, config: AgentConfig) -> ThoughtResponse {
+        // Note: config parameter kept for compatibility but no longer used for parsing logic
         // Priority 1: Check for final answer (always check, as every agent must return answer)
         if let finalAnswer = parseFinalAnswer(from: text) {
             return .finalAnswer(finalAnswer)
         }
-        
-        // Priority 2: Check for each allowed step type
-        if config.allowedSteps.contains(.action), let toolCall = parseToolCall(from: text) {
+
+        // Priority 2: Check for each step type based on actual content
+        // Order matters: action > plan > reflection
+        if let toolCall = parseToolCall(from: text) {
             return .nextStep(.action, .toolCall(toolCall))
         }
-        
-        if config.allowedSteps.contains(.plan), let plan = parsePlan(from: text) {
+
+        if let plan = parsePlan(from: text) {
             return .nextStep(.plan, .text(plan))
         }
-        
-        if config.allowedSteps.contains(.reflection), let reflection = parseReflection(from: text) {
+
+        if let reflection = parseReflection(from: text) {
             return .nextStep(.reflection, .text(reflection))
         }
-        
+
         // Priority 3: Unknown - no specific action detected
         return .unknown(text)
     }
@@ -485,7 +601,99 @@ public class AgentExecutor {
                 return remainingLines.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
-        
+
         return nil
+    }
+
+    /// Direct chat without agent steps
+    /// This is used when agentConfig.allowedSteps is empty
+    /// Always returns a stream (yields chunks if streaming, or yields once if not)
+    private func directChat<Metadata: Codable & Equatable & Sendable>(
+        model: SupportedModel,
+        context: [ChatMessageContent],
+        stream: Bool,
+        metadata: Metadata?
+    ) async throws -> AsyncThrowingStream<ChatMessage, Error> {
+        if stream {
+            // Streaming mode - convert StreamChatResponse to ChatMessage
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let responseStream = try await llmClient.streamChat(
+                            model: model,
+                            messages: context,
+                            metadata: metadata
+                        )
+
+                        var accumulatedMessage: ChatMessageContent?
+                        var creditsResult: CreditsResult?
+
+                        for try await result in responseStream {
+                            switch result {
+                                case .message(let chunk):
+                                    if let existing = accumulatedMessage {
+                                        // Accumulate content and files
+                                        let newContent = (existing.content ?? "") + (chunk.content ?? "")
+                                        let newFiles = (existing.files ?? []) + (chunk.files ?? [])
+                                        accumulatedMessage = ChatMessageContent(
+                                            id: existing.id,
+                                            role: existing.role,
+                                            content: newContent,
+                                            files: newFiles,
+                                            usage: creditsResult
+                                        )
+                                    } else {
+                                        // First chunk
+                                        accumulatedMessage = chunk
+                                    }
+
+                                    // Yield the accumulated message
+                                    if let message = accumulatedMessage {
+                                        continuation.yield(.content(message))
+                                    }
+
+                                case .settlement(let credits):
+                                    creditsResult = credits
+                                    // Update accumulated message with usage
+                                    if var message = accumulatedMessage {
+                                        message.usage = credits
+                                        accumulatedMessage = message
+                                        continuation.yield(.content(message))
+                                    }
+                            }
+                        }
+
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        } else {
+            // Non-streaming mode - return a stream that yields once
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let result = try await llmClient.chat(
+                            model: model,
+                            messages: context,
+                            metadata: metadata
+                        )
+
+                        guard let message = result.data else {
+                            if let error = result.error {
+                                throw AgentError.toolExecutionFailed(error.message)
+                            }
+                            throw AgentError.toolExecutionFailed("No response from LLM")
+                        }
+
+                        continuation.yield(.content(message))
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        }
     }
 }

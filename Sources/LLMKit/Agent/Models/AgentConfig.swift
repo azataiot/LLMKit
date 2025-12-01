@@ -11,7 +11,7 @@ import Foundation
 public enum AgentStepType: String, Codable, Sendable, Hashable {
     case thought      // 思考、推理
     case plan         // 规划步骤
-    case action       // 使用工具（执行后自动产生observation）
+    case action       // 使用工具（执行后自动产生观察）
     case reflection   // 自我反思
 
     /// Whether this step type automatically produces an observation
@@ -61,14 +61,14 @@ extension Array where Element == AgentStepType {
     /// Generate prompt instructions from step types
     /// - Returns: Combined instruction text, with thought always first
     public func generatePrompt() -> String {
-        guard !isEmpty else {
-            return ""
-        }
-
-        // Thought must always be first if present
-        guard contains(.thought) else {
-            return ""
-        }
+//        guard !isEmpty else {
+//            return ""
+//        }
+//
+//        // Thought must always be first if present
+//        guard contains(.thought) else {
+//            return ""
+//        }
 
         // Build ordered steps: thought first, then others in defined order
         var orderedSteps: [AgentStepType] = [.thought]

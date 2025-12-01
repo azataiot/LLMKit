@@ -49,7 +49,7 @@ public actor LLMNetworking {
         let request = try makeRequest(endpoint: endpoint, method: "GET", body: body)
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
-        return try jsonDecoder.decode(T.self, from: data)
+        return try decode(T.self, from: data)
     }
 
     // POST 请求
@@ -60,7 +60,7 @@ public actor LLMNetworking {
         let request = try makeRequest(endpoint: endpoint, method: "POST", body: body)
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
-        return try jsonDecoder.decode(U.self, from: data)
+        return try decode(U.self, from: data)
     }
     
     // MARK: - 新增: 流式请求
@@ -112,6 +112,24 @@ public actor LLMNetworking {
     }
 
     // MARK: - Helpers
+    private func decode<T: Decodable>(
+        _ type: T.Type,
+        from data: Data
+    ) throws -> T {
+        do {
+            return try jsonDecoder.decode(type, from: data)
+        } catch {
+            // 记录原始 JSON 以便调试
+            if let jsonString = String(data: data, encoding: .utf8) {
+                logger.error("Failed to decode \(String(describing: type)). Raw JSON: \(jsonString)")
+            } else {
+                logger.error("Failed to decode \(String(describing: type)). Could not convert data to string.")
+            }
+            throw error
+        }
+    }
+
+    
     private func makeRequest<T: Encodable>(
         endpoint: String,
         method: String,
@@ -137,18 +155,27 @@ public actor LLMNetworking {
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         if !(200..<300).contains(http.statusCode) {
-            if let err = try? JSONDecoder().decode(APIResponse<String>.self, from: data) {
+            // 尝试解码错误响应
+            do {
+                let errorResponse = try JSONDecoder().decode(ErrorResponse.self, from: data)
                 throw NSError(
                     domain: "LLMNetworking",
                     code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: err.error?.message ?? "Unknown server error"]
+                    userInfo: [NSLocalizedDescriptionKey: errorResponse.error.message]
+                )
+            } catch is DecodingError {
+                // 如果无法解码为标准错误格式，抛出通用错误
+                throw NSError(
+                    domain: "LLMNetworking",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
                 )
             }
-            throw NSError(
-                domain: "LLMNetworking",
-                code: http.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
-            )
         }
     }
+}
+
+// MARK: - Error Response Model
+private struct ErrorResponse: Codable {
+    let error: APIError
 }

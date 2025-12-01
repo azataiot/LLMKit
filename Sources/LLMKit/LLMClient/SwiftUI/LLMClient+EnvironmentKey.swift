@@ -222,6 +222,7 @@ struct LLMClientProviderContent: ViewModifier {
                 state.isAuthenticated = isAuthenticated
             }
             .onReceive(refreshCreditsPassthrough.throttle(for: 30.0, scheduler: RunLoop.main, latest: true)) { _ in
+                guard state.isAuthenticated else { return }
                 Task {
                     do {
                         let creditsInfo = try await llmClient.getCredits()

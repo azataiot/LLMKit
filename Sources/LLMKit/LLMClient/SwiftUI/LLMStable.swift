@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import StoreKit
 import LLMCore
 import Logging
 import ChocofordEssentials
@@ -22,6 +23,8 @@ protocol LLMStatable: AnyObject {
 
     /// Computed property for backward compatibility
     var credits: Double { get }
+    
+    func handlePurchase(verificationResult: VerificationResult<Transaction>) async throws
 
     func createConversation<Metadata: Codable & Equatable & Sendable>(
         id: String,
@@ -69,6 +72,23 @@ struct ConversationNotFoundError: Error {}
 extension LLMStatable {
     func updateCreditsInfo(_ creditsInfo: CreditsInfo) {
         self.creditsInfo = creditsInfo
+    }
+    
+    
+    func _handlePurchase(verificationResult: VerificationResult<Transaction>) async throws {
+        switch verificationResult {
+            case .verified(let signed):
+                if let groupID = signed.subscriptionGroupID {
+                    // subscription
+                    try await self.llmClient.restore(groupID: groupID)
+                } else {
+                    _ = try await llmClient.addCredits(
+                        transactionSignedData: verificationResult.jwsRepresentation
+                    )
+                }
+            case .unverified(_, let err):
+                throw err
+        }
     }
     
     func _configurePersistenceProvider(_ provider: PersistenceProvider) {
@@ -157,6 +177,9 @@ extension LLMStatable {
                     $0[index].messages.append(systemMsg)
                 }
             }
+            try await persistenceProvider?.updateConversation(
+                action: .update(id, .insert([systemMsg]))
+            )
         }
 
         // Generate title asynchronously if there's a user message
@@ -216,8 +239,11 @@ extension LLMStatable {
                     $0[index].messages.append(contentsOf: contextMessages)
                 }
             }
+            try await persistenceProvider?.updateConversation(
+                action: .update(id, .insert(Array(contextMessages)))
+            )
         }
-
+        
         // Send only the last message to get a response
         if let lastMessage = messages.last {
             try await _sendMessage(
@@ -340,15 +366,16 @@ extension LLMStatable {
             let conversation = self.conversations.value![index]
             let executor = AgentExecutor(llmClient: llmClient, toolRegistry: toolRegistry)
 
+
             // Use AgentExecutor for all interactions (handles both direct chat and agent steps)
-            let responseMessage = try await executor.execute(
+            // Execute returns a stream now
+            let responseStream = try await executor.execute(
                 conversation: conversation,
                 userMessage: message,
                 model: model,
-                stream: stream && canStream,
                 metadata: metadata
             ) { (stepData: AgentStep) in
-                let agentStep = ChatMessage.agentStep(stepData)
+                let message = ChatMessage.agentStep(stepData)
                 await MainActor.run { [weak self] in
                     guard let self = self else { return }
                     if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
@@ -362,43 +389,80 @@ extension LLMStatable {
                         }
 
                         // Update existing agent step or append new one
-                        if let stepIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == agentStep.id }) {
+                        if let stepIndex = self.conversations.value![i].messages.firstIndex(
+                            where: { $0.id == message.id }
+                        ) {
                             // Update existing step (for streaming updates)
                             self.conversations.transform {
-                                $0[i].messages[stepIndex] = agentStep
+                                $0[i].messages[stepIndex] = message
                             }
                         } else {
                             // Append new step
                             self.conversations.transform {
-                                $0[i].messages.append(agentStep)
+                                $0[i].messages.append(message)
                             }
                         }
                     }
                 }
             }
-            
 
-            // Remove loading message if still present
-            if let i = conversations.value?.firstIndex(where: { $0.id == conversationID }),
-               let loaddingMessageIndex = conversations.value![i].messages.firstIndex(where: {$0.id == loadingResponseMessage.id}) {
+            // Consume the stream
+            var responseMessage: ChatMessage?
+            for try await chatMessage in responseStream {
+                responseMessage = chatMessage
+
+                // Remove loading message on first response
+                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
+                   let loaddingMessageIndex = self.conversations.value![i].messages.firstIndex(where: {$0.id == loadingResponseMessage.id}) {
+                    await MainActor.run {
+                        self.conversations.transform {
+                            $0[i].messages.remove(at: loaddingMessageIndex)
+                        }
+                    }
+                }
+
+                // Update or append the streaming response
                 await MainActor.run {
-                    self.conversations.transform {
-                        $0[i].messages.remove(at: loaddingMessageIndex)
+                    if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+                        if let existingIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == chatMessage.id }) {
+                            // Update existing message
+                            self.conversations.transform {
+                                $0[i].messages[existingIndex] = chatMessage
+                            }
+                        } else {
+                            // Append new message
+                            self.conversations.transform {
+                                $0[i].messages.append(chatMessage)
+                            }
+                        }
                     }
                 }
             }
 
-            // Apply transformer if provided
-            var finalMessage = responseMessage
-            if let replyTransformer {
-                finalMessage = try await replyTransformer(finalMessage)
+            guard let finalMessage = responseMessage else {
+                throw NSError(domain: "LLMStatable", code: 4, userInfo: [NSLocalizedDescriptionKey: "No response received from agent"])
             }
 
-            // Add final response
-            await MainActor.run {
-                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
-                    self.conversations.transform {
-                        $0[i].messages.append(finalMessage)
+            // Extract and update credits from response
+            if case .content(let content) = finalMessage, let creditsResult = content.usage {
+                self.updateCreditsInfo(CreditsInfo(
+                    balance: creditsResult.remains,
+                    subscription: nil,
+                    purchasedCredits: 0
+                ))
+            }
+            
+            // Apply transformer if provided
+            var transformedMessage = finalMessage
+            if let replyTransformer {
+                transformedMessage = try await replyTransformer(transformedMessage)
+                // Update UI with transformed message
+                await MainActor.run {
+                    if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
+                       let messageIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == transformedMessage.id }) {
+                        self.conversations.transform {
+                            $0[i].messages[messageIndex] = transformedMessage
+                        }
                     }
                 }
             }

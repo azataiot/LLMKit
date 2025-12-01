@@ -88,14 +88,14 @@ public struct AppStoreAuthProvider: LLMAuthProvider {
         return data.token
     }
 
-    public func handlePurchase(transactionJWS: String) async throws -> CreditAddResponse {
+    public func handlePurchase(transactionJWS: String) async throws -> CreditsInfo {
         let req = CreditAddRequest(
             transactionSignedData: transactionJWS,
             bundleID: bundleID,
             ascAppID: ascAppID
         )
         
-        let data: CreditAddResponse = try await networking.post("/credits/add", body: req)
+        let data: CreditsInfo = try await networking.post("/credits/add", body: req)
         return data
     }
     

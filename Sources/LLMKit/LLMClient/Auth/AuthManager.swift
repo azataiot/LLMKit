@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import LLMCore
 
 public actor LLMAuthManager {
     private let provider: LLMAuthProvider
@@ -46,9 +47,9 @@ public actor LLMAuthManager {
     }
     
     /// Return the current balance after purchase
-    public func purchaseCompleted(jws: String) async throws -> Double {
+    public func purchaseCompleted(jws: String) async throws -> CreditsInfo {
         let response = try await provider.handlePurchase(transactionJWS: jws)
         // self.token = response.token
-        return response.balance
+        return response
     }
 }
