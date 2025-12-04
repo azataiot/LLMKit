@@ -80,7 +80,7 @@ extension LLMStatable {
             case .verified(let signed):
                 if let groupID = signed.subscriptionGroupID {
                     // subscription
-                    try await self.llmClient.restore(groupID: groupID)
+                    await self.llmClient.restore(groupID: groupID)
                 } else {
                     _ = try await llmClient.addCredits(
                         transactionSignedData: verificationResult.jwsRepresentation
