@@ -35,6 +35,7 @@ protocol LLMStatable: AnyObject {
         messages: [ChatMessage],
         stream: Bool,
         metadata: Metadata,
+        context invocationContext: (any ChatInvocationContext)?,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)?
     ) async throws
 
@@ -44,6 +45,7 @@ protocol LLMStatable: AnyObject {
         message: ChatMessage,
         stream: Bool,
         metadata: Metadata,
+        context invocationContext: (any ChatInvocationContext)?,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)?
     ) async throws
 
@@ -53,6 +55,7 @@ protocol LLMStatable: AnyObject {
         model: SupportedModel,
         stream: Bool,
         metadata: Metadata,
+        context invocationContext: (any ChatInvocationContext)?,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)?
     ) async throws
 
@@ -111,6 +114,7 @@ extension LLMStatable {
         messages: [ChatMessage],
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         guard case .loaded = conversations else {
@@ -252,6 +256,7 @@ extension LLMStatable {
                 message: lastMessage,
                 stream: stream,
                 metadata: metadata,
+                invocationContext: invocationContext,
                 replyTransformer: replyTransformer
             )
         }
@@ -263,6 +268,7 @@ extension LLMStatable {
         model: SupportedModel,
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         guard case .loaded = conversations else {
@@ -311,6 +317,7 @@ extension LLMStatable {
             message: userMessage,
             stream: stream,
             metadata: metadata,
+            invocationContext: invocationContext,
             replyTransformer: replyTransformer
         )
     }
@@ -321,6 +328,7 @@ extension LLMStatable {
         message: ChatMessage,
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         guard case .loaded = conversations else {
@@ -374,7 +382,8 @@ extension LLMStatable {
                 agentConfig: conversation.agentConfig,
                 contextMessages: conversation.messages.contentMessages,
                 model: model,
-                metadata: metadata
+                metadata: metadata,
+                invocationContext: invocationContext
             ) { (stepData: AgentStep) in
                 let message = ChatMessage.agentStep(stepData)
                 await MainActor.run { [weak self] in
@@ -713,4 +722,3 @@ extension LLMStatable {
         }
     }
 }
-

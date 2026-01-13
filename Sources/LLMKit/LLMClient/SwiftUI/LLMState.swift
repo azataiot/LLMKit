@@ -55,6 +55,7 @@ public final class LLMStateObject: ObservableObject, LLMStatable {
         messages: [ChatMessage],
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         try await self._createConversation(
@@ -66,6 +67,7 @@ public final class LLMStateObject: ObservableObject, LLMStatable {
             messages: messages,
             stream: stream,
             metadata: metadata,
+            invocationContext: invocationContext,
             replyTransformer: replyTransformer
         )
     }
@@ -76,6 +78,7 @@ public final class LLMStateObject: ObservableObject, LLMStatable {
         message: ChatMessage,
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         try await self._sendMessage(
@@ -84,6 +87,7 @@ public final class LLMStateObject: ObservableObject, LLMStatable {
             message: message,
             stream: stream,
             metadata: metadata,
+            invocationContext: invocationContext,
             replyTransformer: replyTransformer
         )
     }
@@ -94,6 +98,7 @@ public final class LLMStateObject: ObservableObject, LLMStatable {
         model: SupportedModel,
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         try await self._regenerateMessage(
@@ -102,6 +107,7 @@ public final class LLMStateObject: ObservableObject, LLMStatable {
             model: model,
             stream: stream,
             metadata: metadata,
+            invocationContext: invocationContext,
             replyTransformer: replyTransformer
         )
     }
@@ -174,6 +180,7 @@ public final class LLMState: LLMStatable {
         messages: [ChatMessage],
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         try await self._createConversation(
@@ -185,6 +192,7 @@ public final class LLMState: LLMStatable {
             messages: messages,
             stream: stream,
             metadata: metadata,
+            invocationContext: invocationContext,
             replyTransformer: replyTransformer
         )
     }
@@ -195,6 +203,7 @@ public final class LLMState: LLMStatable {
         message: ChatMessage,
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         try await self._sendMessage(
@@ -203,6 +212,7 @@ public final class LLMState: LLMStatable {
             message: message,
             stream: stream,
             metadata: metadata,
+            invocationContext: invocationContext,
             replyTransformer: replyTransformer
         )
     }
@@ -213,6 +223,7 @@ public final class LLMState: LLMStatable {
         model: SupportedModel,
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
         try await self._regenerateMessage(
@@ -221,6 +232,7 @@ public final class LLMState: LLMStatable {
             model: model,
             stream: stream,
             metadata: metadata,
+            invocationContext: invocationContext,
             replyTransformer: replyTransformer
         )
     }

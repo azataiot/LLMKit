@@ -246,7 +246,7 @@ struct LLMClientProviderContent: ViewModifier {
 
 
 extension View {
-    @MainActor @ViewBuilder
+    @ViewBuilder
     func withLLMStateEnvironment(_ state: any LLMStatable) -> some View {
         if #available(macOS 14.0, iOS 17.0, *), let state = state as? LLMState {
             environment(state)
@@ -258,21 +258,35 @@ extension View {
     }
     
     
-    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
-    @MainActor @ViewBuilder
+    @ViewBuilder
     public func llmProvider(
         client: LLMClient,
-        persistenceProvider: PersistenceProvider?
+        persistenceProvider: PersistenceProvider?,
+        lagacy: Bool = false,
     ) -> some View {
-        modifier(
-            LLMClientProvider.modern(
-                llmClient: client,
-                persistenceProvider: persistenceProvider
+        if #available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *), !lagacy {
+            modifier(
+                LLMClientProvider.modern(
+                    llmClient: client,
+                    persistenceProvider: persistenceProvider
+                )
             )
-        )
+        } else if lagacy {
+            modifier(
+                LLMClientProvider.lagacy(
+                    llmClient: client,
+                    persistenceProvider: persistenceProvider
+                )
+            )
+        } else {
+            self.onAppear {
+                fatalError("Not support")
+            }
+        }
     }
+    
     @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
-    @MainActor @ViewBuilder
+    @ViewBuilder
     public func llmProvider(
         state: LLMState,
         client: LLMClient,
@@ -284,20 +298,9 @@ extension View {
             )
         )
     }
-    @MainActor @ViewBuilder
-    public func llmProviderLagacy(
-        client: LLMClient,
-        persistenceProvider: PersistenceProvider?
-    ) -> some View {
-        modifier(
-            LLMClientProvider.lagacy(
-                llmClient: client,
-                persistenceProvider: persistenceProvider
-            )
-        )
-    }
-    @MainActor @ViewBuilder
-    public func llmProviderLagacy(
+    
+    @ViewBuilder
+    public func llmProvider(
         state: LLMStateObject,
         client: LLMClient,
     ) -> some View {
