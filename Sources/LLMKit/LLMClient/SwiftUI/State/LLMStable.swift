@@ -13,11 +13,15 @@ import ChocofordEssentials
 
 @MainActor
 protocol LLMStatable: AnyObject {
+    associatedtype StreamingState: StreamingMessageState
+    
     var logger: Logger { get }
     var llmClient: LLMClient { get }
     var toolRegistry: ToolRegistry { get }
     var isAuthenticated: Bool { get set }
     var conversations: Loadable<[Conversation]> { get set }
+    var streamingStore: StreamingStore<StreamingState> { get set }
+    
     var creditsInfo: CreditsInfo? { get set }
     var persistenceProvider: PersistenceProvider? { get set }
 
@@ -352,6 +356,13 @@ extension LLMStatable {
                 $0[index].messages.append(loadingResponseMessage)
             }
         }
+        await MainActor.run {
+            let streamState = self.streamingStore.stream(for: conversationID)
+            streamState.id = UUID().uuidString
+            streamState.content = ""
+            streamState.files = []
+            streamState.isFinished = false
+        }
         
         do {
             // Upload files if any
@@ -431,20 +442,13 @@ extension LLMStatable {
                     }
                 }
 
-                // Update or append the streaming response
                 await MainActor.run {
-                    if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
-                        if let existingIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == chatMessage.id }) {
-                            // Update existing message
-                            self.conversations.transform {
-                                $0[i].messages[existingIndex] = chatMessage
-                            }
-                        } else {
-                            // Append new message
-                            self.conversations.transform {
-                                $0[i].messages.append(chatMessage)
-                            }
-                        }
+                    if case .content(let content) = chatMessage {
+                        let streamState = self.streamingStore.stream(for: conversationID)
+                        streamState.id = content.id
+                        streamState.content = content.content ?? ""
+                        streamState.files = content.files ?? []
+                        streamState.isFinished = false
                     }
                 }
             }
@@ -466,15 +470,31 @@ extension LLMStatable {
             var transformedMessage = finalMessage
             if let replyTransformer {
                 transformedMessage = try await replyTransformer(transformedMessage)
-                // Update UI with transformed message
+            }
+            
+            if case .content(let content) = transformedMessage {
                 await MainActor.run {
-                    if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
-                       let messageIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == transformedMessage.id }) {
+                    let streamState = self.streamingStore.stream(for: conversationID)
+                    streamState.id = content.id
+                    streamState.content = content.content ?? ""
+                    streamState.files = content.files ?? []
+                    streamState.isFinished = true
+                }
+            }
+
+            await MainActor.run {
+                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+                    if let messageIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == transformedMessage.id }) {
                         self.conversations.transform {
                             $0[i].messages[messageIndex] = transformedMessage
                         }
+                    } else {
+                        self.conversations.transform {
+                            $0[i].messages.append(transformedMessage)
+                        }
                     }
                 }
+                self.streamingStore.removeStream(for: conversationID)
             }
 
             // Persist all new messages (user message + agent steps + final response)
@@ -484,150 +504,6 @@ extension LLMStatable {
                     action: .update(conversationID, .insert(Array(newMessages)))
                 )
             }
-
-            // Old streaming code kept below for reference, can be removed later
-            /*
-            if stream && canStream {
-                // TODO: 抽象出方法统一这部分的逻辑，这里目前和_temporaryChat的实现略有重复
-                // TODO: 但是碍于回调不是Sendable的，会报错
-                //                try await self._temporaryChat(
-                //                    model: model,
-                //                    messages: self.conversations.value![index].messages,
-                //                    stream: stream && canStream
-                //                ) { message in
-                //                    await MainActor.run {
-                //                        if let i = self.conversations.value![index].messages.firstIndex(where: {$0.id == resMessage?.id}) {
-                //                            self.conversations.transform {
-                //                                $0[index].messages[i] = resMessage!
-                //                            }
-                //                        } else {
-                //                            self.conversations.transform {
-                //                                $0[index].messages.append(resMessage!)
-                //                            }
-                //                        }
-                //                    }
-                //                } onFirstReply: { message in
-                //                    if let loaddingMessageIndex = self.conversations.value![index].messages.firstIndex(
-                //                        where: {$0.id == loadingResponseMessage.id}
-                //                    ) {
-                //                        self.conversations.transform {
-                //                            $0[index].messages.remove(at: loaddingMessageIndex)
-                //                        }
-                //                    }
-                //                }
-                
-                
-                let stream = try await llmClient.streamChat(
-                    model: model,
-                    messages: self.conversations.value![index].messages.contentMessages
-                )
-                var resMessage: ChatMessage?
-                for try await result in stream {
-                    switch result {
-                        case .message(let result):
-                            if case .content(let partial) = resMessage {
-                                let newContent = (partial.content ?? "") + (result.content ?? "")
-                                let newFiles = (partial.files ?? []) + (result.files ?? [])
-                                resMessage?.content = newContent
-                                resMessage?.files = newFiles
-                            } else {
-                                if let loaddingMessageIndex = conversations.value![index].messages.firstIndex(
-                                    where: {$0.id == loadingResponseMessage.id}
-                                ) {
-                                    self.conversations.transform {
-                                        $0[index].messages.remove(at: loaddingMessageIndex)
-                                    }
-                                }
-                                resMessage = result
-                            }
-                        case .settlement(let creditsResult):
-                            resMessage?.usage = creditsResult
-                            // update credits
-                            self.updateCreditsInfo(CreditsInfo(
-                                balance: creditsResult.remains,
-                                subscription: nil,
-                                purchasedCredits: 0
-                            ))
-                    }
-                    await MainActor.run {
-                        if let i = conversations.value![index].messages.firstIndex(where: {$0.id == resMessage?.id}) {
-                            self.conversations.transform {
-                                $0[index].messages[i] = resMessage!
-                            }
-                        } else {
-                            self.conversations.transform {
-                                $0[index].messages.append(resMessage!)
-                            }
-                        }
-                    }
-                }
-                if var resMessage {
-                    // Apply transformer if provided
-                    if let replyTransformer {
-                        resMessage = try await replyTransformer(resMessage)
-                        // Update UI with transformed message
-                        await MainActor.run {
-                            if let i = conversations.value![index].messages.firstIndex(where: {$0.id == resMessage.id}) {
-                                self.conversations.transform {
-                                    $0[index].messages[i] = resMessage
-                                }
-                            }
-                        }
-                    }
-                    
-                    try await persistenceProvider?.updateConversation(
-                        action: .update(conversationID, .insert([message, resMessage]))
-                    )
-                }
-            } else {
-                let result: APIResponse<ChatMessage> = try await self.llmClient.chat(
-                    model: model,
-                    messages: conversations.value![index].messages.contentMessages
-                )
-                logger.info("Chat result: \(String(describing: result).prefix(1024))")
-                if let loaddingMessageIndex = self.conversations.value![index].messages.firstIndex(where: {
-                    $0.id == loadingResponseMessage.id
-                }) {
-                    await MainActor.run {
-                        self.conversations.transform {
-                            $0[index].messages.remove(at: loaddingMessageIndex)
-                        }
-                    }
-                }
-                if let error = result.error {
-                    await MainActor.run {
-                        self.conversations.transform {
-                            $0[index].messages.append(.error(UUID(), error.message))
-                        }
-                    }
-                } else if var resMessage = result.data {
-                    // Apply transformer if provided
-                    if let replyTransformer {
-                        resMessage = try await replyTransformer(resMessage)
-                    }
-                    
-                    await MainActor.run {
-                        self.conversations.transform {
-                            $0[index].messages.append(resMessage)
-                        }
-                    }
-                    if let credits = result.credits {
-                        self.updateCreditsInfo(CreditsInfo(
-                            balance: credits.remains,
-                            subscription: nil,
-                            purchasedCredits: 0
-                        ))
-                    }
-                    
-                    try await persistenceProvider?.updateConversation(
-                        action: .update(
-                            conversationID,
-                            .insert([ message, resMessage ])
-                        )
-                    )
-                }
-            }
-            */
         } catch {
             if let loaddingMessageIndex = conversations.value![index].messages.firstIndex(where: {$0.id == loadingResponseMessage.id}) {
                 await MainActor.run {
@@ -640,6 +516,9 @@ extension LLMStatable {
                 self.conversations.transform {
                     $0[index].messages.append(.error(UUID(), error.localizedDescription))
                 }
+            }
+            await MainActor.run {
+                self.streamingStore.removeStream(for: conversationID)
             }
             throw error
         }
@@ -721,4 +600,40 @@ extension LLMStatable {
             //            }
         }
     }
+}
+
+
+public final class StreamingStore<State: StreamingMessageState> {
+    private var streams: [Conversation.ID: State] = [:]
+
+    public init() {}
+
+    public func stream(for id: Conversation.ID) -> State {
+        if let existing = streams[id] {
+            return existing
+        }
+
+        let state = State(conversationID: id)
+        streams[id] = state
+        return state
+    }
+
+    public func removeStream(for id: Conversation.ID) {
+        streams[id] = nil
+    }
+
+    public func streamIfExists(for id: Conversation.ID) -> StreamingMessageState? {
+        streams[id]
+    }
+}
+
+public protocol StreamingMessageState: Identifiable {
+    var id: String { get set }
+    var conversationID: Conversation.ID { get set }
+
+    var content: String { get set }
+    var files: [ChatMessageContent.File] { get set }
+    var isFinished: Bool { get set }
+    
+    init(conversationID: Conversation.ID)
 }

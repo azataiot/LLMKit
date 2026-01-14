@@ -13,135 +13,31 @@ import LLMCore
 import Logging
 import StoreKit
 
+@available(macOS 14.0, iOS 17.0, *)
 @MainActor
-public final class LLMStateObject: ObservableObject, LLMStatable {
-    let logger = Logger(label: "LLMStateObject")
-    var llmClient: LLMClient
-    var toolRegistry: ToolRegistry
-    var persistenceProvider: (any PersistenceProvider)?
+@Observable
+public final class LLMStreamingState: @MainActor StreamingMessageState {
+    public var id: String
+    public var conversationID: Conversation.ID
+    public var content: String
+    public var files: [ChatMessageContent.File]
+    public var isFinished: Bool
 
-    public init(llmClient: LLMClient, toolRegistry: ToolRegistry = ToolRegistry(), persistenceProvider: PersistenceProvider?) {
-        self.llmClient = llmClient
-        self.toolRegistry = toolRegistry
-        self.persistenceProvider = persistenceProvider
-    }
-
-    @Published public internal(set) var isAuthenticated: Bool = false
-
-    @Published public internal(set) var conversations: Loadable<[Conversation]> = .notRequested
-
-    @Published public internal(set) var creditsInfo: CreditsInfo? = nil
-
-    /// Computed property for backward compatibility
-    public var credits: Double {
-        creditsInfo?.balance ?? 0
-    }
-
-    // @discardableResult
-    public func handlePurchase(verificationResult: VerificationResult<StoreKit.Transaction>) async throws {
-        try await self._handlePurchase(verificationResult: verificationResult)
-    }
-    
-    public func configurePersistenceProvider(_ provider: PersistenceProvider) {
-        self._configurePersistenceProvider(provider)
-    }
-
-    public func createConversation<Metadata: Codable & Equatable & Sendable>(
-        id: String,
-        type: Conversation.ConversationTpye = .normal,
-        model: SupportedModel,
-        agentConfig: AgentConfig = .chat,
-        systemMessage: String? = nil,
-        messages: [ChatMessage],
-        stream: Bool = true,
-        metadata: Metadata = EmptyMetadata(),
-        context invocationContext: (any ChatInvocationContext)? = nil,
-        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
-    ) async throws {
-        try await self._createConversation(
-            id: id,
-            type: type,
-            model: model,
-            agentConfig: agentConfig,
-            systemMessage: systemMessage,
-            messages: messages,
-            stream: stream,
-            metadata: metadata,
-            invocationContext: invocationContext,
-            replyTransformer: replyTransformer
-        )
-    }
-
-    public func sendMessage<Metadata: Codable & Equatable & Sendable>(
-        to conversationID: String,
-        model: SupportedModel,
-        message: ChatMessage,
-        stream: Bool = true,
-        metadata: Metadata = EmptyMetadata(),
-        context invocationContext: (any ChatInvocationContext)? = nil,
-        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
-    ) async throws {
-        try await self._sendMessage(
-            to: conversationID,
-            model: model,
-            message: message,
-            stream: stream,
-            metadata: metadata,
-            invocationContext: invocationContext,
-            replyTransformer: replyTransformer
-        )
-    }
-
-    public func regenerateMessage<Metadata: Codable & Equatable & Sendable>(
-        in conversationID: String,
-        fromMessageID: String,
-        model: SupportedModel,
-        stream: Bool = true,
-        metadata: Metadata = EmptyMetadata(),
-        context invocationContext: (any ChatInvocationContext)? = nil,
-        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
-    ) async throws {
-        try await self._regenerateMessage(
-            in: conversationID,
-            fromMessageID: fromMessageID,
-            model: model,
-            stream: stream,
-            metadata: metadata,
-            invocationContext: invocationContext,
-            replyTransformer: replyTransformer
-        )
-    }
-
-    public func temporaryChat(
-        model: SupportedModel,
-        messages: [ChatMessage],
-        stream: Bool = true,
-        onUpdate: @escaping (_ message: ChatMessage) async throws -> Void,
-        onFirstReply: @escaping (_ message: ChatMessage) async throws -> Void = { _ in },
-    ) async throws -> ChatMessage {
-        try await self._temporaryChat(
-            model: model,
-            messages: messages,
-            stream: stream,
-            onUpdate: onUpdate,
-            onFirstReply: onFirstReply
-        )
-    }
-
-    public func refreshConversations() async {
-        await self._refreshConversations()
-    }
-
-    public func getConversation(by id: String) -> Conversation? {
-        self._getConversation(by: id)
+    public init(conversationID: Conversation.ID) {
+        self.id = UUID().uuidString
+        self.conversationID = conversationID
+        self.content = ""
+        self.files = []
+        self.isFinished = false
     }
 }
-
 
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 @Observable
-public final class LLMState: LLMStatable {
+public final class LLMState:  @MainActor LLMStatable {
+    public typealias StreamingState = LLMStreamingState
+
     let logger = Logger(label: "LLMState")
     var llmClient: LLMClient
     var toolRegistry: ToolRegistry
@@ -155,6 +51,7 @@ public final class LLMState: LLMStatable {
     
     public internal(set) var isAuthenticated: Bool = false
     public internal(set) var conversations: Loadable<[Conversation]> = .notRequested
+    public internal(set) var streamingStore: StreamingStore<LLMStreamingState> = .init()
     public internal(set) var creditsInfo: CreditsInfo? = nil
 
     /// Computed property for backward compatibility

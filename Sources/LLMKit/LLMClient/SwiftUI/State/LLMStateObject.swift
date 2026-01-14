@@ -1,0 +1,165 @@
+//
+//  File.swift
+//  LLMKit
+//
+//  Created by Chocoford on 1/14/26.
+//
+
+#if canImport(SwiftUI)
+import SwiftUI
+
+import ChocofordEssentials
+import LLMCore
+import Logging
+import StoreKit
+
+
+@MainActor
+public final class LLMStreamingStateObject: ObservableObject, @MainActor StreamingMessageState {
+    @Published public var id: String
+    @Published public var conversationID: Conversation.ID
+    @Published public var content: String
+    @Published public var files: [ChatMessageContent.File]
+    @Published public var isFinished: Bool
+
+    public init(conversationID: Conversation.ID) {
+        self.id = UUID().uuidString
+        self.conversationID = conversationID
+        self.content = ""
+        self.files = []
+        self.isFinished = false
+    }
+}
+
+
+@MainActor
+public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
+    public typealias StreamingState = LLMStreamingStateObject
+
+    let logger = Logger(label: "LLMStateObject")
+    var llmClient: LLMClient
+    var toolRegistry: ToolRegistry
+    var persistenceProvider: (any PersistenceProvider)?
+
+    public init(llmClient: LLMClient, toolRegistry: ToolRegistry = ToolRegistry(), persistenceProvider: PersistenceProvider?) {
+        self.llmClient = llmClient
+        self.toolRegistry = toolRegistry
+        self.persistenceProvider = persistenceProvider
+    }
+
+    @Published public internal(set) var isAuthenticated: Bool = false
+
+    @Published public internal(set) var conversations: Loadable<[Conversation]> = .notRequested
+
+    public internal(set) var streamingStore: StreamingStore<LLMStreamingStateObject> = .init()
+
+    @Published public internal(set) var creditsInfo: CreditsInfo? = nil
+
+    /// Computed property for backward compatibility
+    public var credits: Double {
+        creditsInfo?.balance ?? 0
+    }
+
+    // @discardableResult
+    public func handlePurchase(verificationResult: VerificationResult<StoreKit.Transaction>) async throws {
+        try await self._handlePurchase(verificationResult: verificationResult)
+
+    }
+    
+    public func configurePersistenceProvider(_ provider: PersistenceProvider) {
+        self._configurePersistenceProvider(provider)
+    }
+
+    public func createConversation<Metadata: Codable & Equatable & Sendable>(
+        id: String,
+        type: Conversation.ConversationTpye = .normal,
+        model: SupportedModel,
+        agentConfig: AgentConfig = .chat,
+        systemMessage: String? = nil,
+        messages: [ChatMessage],
+        stream: Bool = true,
+        metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
+    ) async throws {
+        try await self._createConversation(
+            id: id,
+            type: type,
+            model: model,
+            agentConfig: agentConfig,
+            systemMessage: systemMessage,
+            messages: messages,
+            stream: stream,
+            metadata: metadata,
+            invocationContext: invocationContext,
+            replyTransformer: replyTransformer
+        )
+    }
+
+    public func sendMessage<Metadata: Codable & Equatable & Sendable>(
+        to conversationID: String,
+        model: SupportedModel,
+        message: ChatMessage,
+        stream: Bool = true,
+        metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
+    ) async throws {
+        try await self._sendMessage(
+            to: conversationID,
+            model: model,
+            message: message,
+            stream: stream,
+            metadata: metadata,
+            invocationContext: invocationContext,
+            replyTransformer: replyTransformer
+        )
+    }
+
+    public func regenerateMessage<Metadata: Codable & Equatable & Sendable>(
+        in conversationID: String,
+        fromMessageID: String,
+        model: SupportedModel,
+        stream: Bool = true,
+        metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
+    ) async throws {
+        try await self._regenerateMessage(
+            in: conversationID,
+            fromMessageID: fromMessageID,
+            model: model,
+            stream: stream,
+            metadata: metadata,
+            invocationContext: invocationContext,
+            replyTransformer: replyTransformer
+        )
+    }
+
+    public func temporaryChat(
+        model: SupportedModel,
+        messages: [ChatMessage],
+        stream: Bool = true,
+        onUpdate: @escaping (_ message: ChatMessage) async throws -> Void,
+        onFirstReply: @escaping (_ message: ChatMessage) async throws -> Void = { _ in },
+    ) async throws -> ChatMessage {
+        try await self._temporaryChat(
+            model: model,
+            messages: messages,
+            stream: stream,
+            onUpdate: onUpdate,
+            onFirstReply: onFirstReply
+        )
+    }
+
+    public func refreshConversations() async {
+        await self._refreshConversations()
+    }
+
+    public func getConversation(by id: String) -> Conversation? {
+        self._getConversation(by: id)
+    }
+}
+
+
+#endif

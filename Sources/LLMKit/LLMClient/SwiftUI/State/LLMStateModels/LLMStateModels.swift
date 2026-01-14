@@ -1,5 +1,5 @@
 //
-//  File.swift
+//  LLMStateModels.swift
 //  LLMKit
 //
 //  Created by Chocoford on 11/25/25.
