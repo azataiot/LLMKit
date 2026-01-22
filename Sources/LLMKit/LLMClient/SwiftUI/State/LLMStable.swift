@@ -35,7 +35,7 @@ protocol LLMStatable: AnyObject {
         type: Conversation.ConversationTpye,
         model: SupportedModel,
         agentConfig: AgentConfig,
-        systemMessage: String?,
+        appendingPrompt: String?,
         messages: [ChatMessage],
         stream: Bool,
         metadata: Metadata,
@@ -114,7 +114,7 @@ extension LLMStatable {
         type: Conversation.ConversationTpye = .normal,
         model: SupportedModel,
         agentConfig: AgentConfig = .chat,
-        systemMessage: String? = nil,
+        appendingPrompt: String? = nil,
         messages: [ChatMessage],
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
@@ -152,23 +152,23 @@ extension LLMStatable {
         // Build complete system prompt
         var systemPromptParts: [String] = []
 
-        // 1. User-provided system message (if any)
-        if let systemMessage = systemMessage {
-            systemPromptParts.append(systemMessage)
+        // 1. AgentConfig prompt (system prompt + strategy instructions)
+        let agentPrompt = agentConfig.prompt
+        if !agentPrompt.isEmpty {
+            systemPromptParts.append(agentPrompt)
         }
 
-        // 2. Strategy instructions from agentConfig
-        let strategyInstructions = agentConfig.generateStrategyInstructions()
-        if !strategyInstructions.isEmpty {
-            systemPromptParts.append(strategyInstructions)
-        }
-
-        // 3. Tools description (if agent uses tools)
+        // 2. Tools description (if agent uses tools)
         if !agentConfig.tools.isEmpty {
             let toolsDesc = await toolRegistry.generateToolsDescription(for: agentConfig.tools)
             if !toolsDesc.isEmpty {
                 systemPromptParts.append(toolsDesc)
             }
+        }
+
+        // 3. User-provided appending prompt (if any) appended last
+        if let appendingPrompt = appendingPrompt, !appendingPrompt.isEmpty {
+            systemPromptParts.append(appendingPrompt)
         }
 
         // Combine all parts and add as system message
@@ -361,6 +361,7 @@ extension LLMStatable {
             streamState.id = UUID().uuidString
             streamState.content = ""
             streamState.files = []
+            streamState.stepType = nil
             streamState.isFinished = false
         }
         
@@ -384,6 +385,7 @@ extension LLMStatable {
 
             let conversation = self.conversations.value![index]
             let executor = AgentExecutor(llmProvider: llmClient, toolRegistry: toolRegistry)
+            var pendingAgentStep: ChatMessage?
 
 
             // Use AgentExecutor for all interactions (handles both direct chat and agent steps)
@@ -399,29 +401,56 @@ extension LLMStatable {
                 let message = ChatMessage.agentStep(stepData)
                 await MainActor.run { [weak self] in
                     guard let self = self else { return }
-                    if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
-                        // Remove loading message if it's the first step
-                        if let loaddingMessageIndex = self.conversations.value![i].messages.firstIndex(
-                            where: {$0.id == loadingResponseMessage.id}
-                        ) {
+                    if let pending = pendingAgentStep, pending.id == message.id {
+                        pendingAgentStep = message
+                    } else {
+                        if let previous = pendingAgentStep,
+                           let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
+                           !self.conversations.value![i].messages.contains(where: { $0.id == previous.id }) {
                             self.conversations.transform {
-                                $0[i].messages.remove(at: loaddingMessageIndex)
+                                $0[i].messages.append(previous)
                             }
                         }
+                        pendingAgentStep = message
+                    }
 
-                        // Update existing agent step or append new one
-                        if let stepIndex = self.conversations.value![i].messages.firstIndex(
-                            where: { $0.id == message.id }
-                        ) {
-                            // Update existing step (for streaming updates)
+                    let streamState = self.streamingStore.stream(for: conversationID)
+                    streamState.id = message.id
+                    streamState.content = stepData.content
+                    streamState.files = []
+                    streamState.stepType = stepData.type
+                    streamState.isFinished = false
+
+                    if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
+                       let loaddingMessageIndex = self.conversations.value![i].messages.firstIndex(
+                        where: { $0.id == loadingResponseMessage.id }
+                       ) {
+                        self.conversations.transform {
+                            $0[i].messages.remove(at: loaddingMessageIndex)
+                        }
+                    }
+                }
+
+                if let title = stepData.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !title.isEmpty {
+                    var shouldPersistTitle = false
+                    await MainActor.run {
+                        if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
+                           self.conversations.value?[i].title != title {
                             self.conversations.transform {
-                                $0[i].messages[stepIndex] = message
+                                $0[i].title = title
                             }
-                        } else {
-                            // Append new step
-                            self.conversations.transform {
-                                $0[i].messages.append(message)
-                            }
+                            shouldPersistTitle = true
+                        }
+                    }
+
+                    if shouldPersistTitle {
+                        do {
+                            try await self.persistenceProvider?.updateConversation(
+                                action: .update(conversationID, .updateTitle(title))
+                            )
+                        } catch {
+                            self.logger.error("Failed to update conversation title: \(error)")
                         }
                     }
                 }
@@ -429,6 +458,7 @@ extension LLMStatable {
 
             // Consume the stream
             var responseMessage: ChatMessage?
+            var didAppendPendingStep = false
             for try await chatMessage in responseStream {
                 responseMessage = chatMessage
 
@@ -444,10 +474,21 @@ extension LLMStatable {
 
                 await MainActor.run {
                     if case .content(let content) = chatMessage {
+                        if !didAppendPendingStep, let pending = pendingAgentStep,
+                           let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
+                           !self.conversations.value![i].messages.contains(where: { $0.id == pending.id }) {
+                            self.conversations.transform {
+                                $0[i].messages.append(pending)
+                            }
+                            pendingAgentStep = nil
+                            didAppendPendingStep = true
+                        }
+
                         let streamState = self.streamingStore.stream(for: conversationID)
                         streamState.id = content.id
                         streamState.content = content.content ?? ""
                         streamState.files = content.files ?? []
+                        streamState.stepType = nil
                         streamState.isFinished = false
                     }
                 }
@@ -478,12 +519,21 @@ extension LLMStatable {
                     streamState.id = content.id
                     streamState.content = content.content ?? ""
                     streamState.files = content.files ?? []
+                    streamState.stepType = nil
                     streamState.isFinished = true
                 }
             }
 
             await MainActor.run {
                 if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+                    if let pendingAgentStep {
+                        let existingIds = Set(self.conversations.value![i].messages.map { $0.id })
+                        if !existingIds.contains(pendingAgentStep.id) {
+                            self.conversations.transform {
+                                $0[i].messages.append(pendingAgentStep)
+                            }
+                        }
+                    }
                     if let messageIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == transformedMessage.id }) {
                         self.conversations.transform {
                             $0[i].messages[messageIndex] = transformedMessage
@@ -627,12 +677,13 @@ public final class StreamingStore<State: StreamingMessageState> {
     }
 }
 
-public protocol StreamingMessageState: Identifiable {
+public protocol StreamingMessageState: AnyObject, Identifiable {
     var id: String { get set }
     var conversationID: Conversation.ID { get set }
 
     var content: String { get set }
     var files: [ChatMessageContent.File] { get set }
+    var stepType: AgentStep.StepType? { get set }
     var isFinished: Bool { get set }
     
     init(conversationID: Conversation.ID)

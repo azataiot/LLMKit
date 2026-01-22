@@ -20,6 +20,7 @@ public final class LLMStreamingStateObject: ObservableObject, @MainActor Streami
     @Published public var conversationID: Conversation.ID
     @Published public var content: String
     @Published public var files: [ChatMessageContent.File]
+    @Published public var stepType: AgentStep.StepType?
     @Published public var isFinished: Bool
 
     public init(conversationID: Conversation.ID) {
@@ -27,6 +28,7 @@ public final class LLMStreamingStateObject: ObservableObject, @MainActor Streami
         self.conversationID = conversationID
         self.content = ""
         self.files = []
+        self.stepType = nil
         self.isFinished = false
     }
 }
@@ -75,7 +77,7 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
         type: Conversation.ConversationTpye = .normal,
         model: SupportedModel,
         agentConfig: AgentConfig = .chat,
-        systemMessage: String? = nil,
+        appendingPrompt: String? = nil,
         messages: [ChatMessage],
         stream: Bool = true,
         metadata: Metadata = EmptyMetadata(),
@@ -87,7 +89,7 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
             type: type,
             model: model,
             agentConfig: agentConfig,
-            systemMessage: systemMessage,
+            appendingPrompt: appendingPrompt,
             messages: messages,
             stream: stream,
             metadata: metadata,
