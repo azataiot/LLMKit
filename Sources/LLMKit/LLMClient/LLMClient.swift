@@ -109,15 +109,13 @@ public final class LLMClient: Sendable {
     }
     
     public func ask(
-        systemPrompt: String? = nil,
-        userPrompt: String,
+        prompt: String,
         model: SupportedModel = .gpt4oMini
-    ) async throws -> String {
-        let body = AskRequest(systemPrompt: systemPrompt, userPrompt: userPrompt, model: model)
-        let data: String = try await self.networking.post("/chat/ask", body: body)
-        
-        //        let result = String(data: data, encoding: .utf8)
-        return data
+    ) async throws -> APIResponse<ChatMessageContent> {
+        let body = AskRequest<EmptyMetadata>(prompt: prompt, model: model)
+        let response: APIResponse<ChatMessageContent> = try await self.networking.post("/chat/ask", body: body)
+
+        return withUsageMiddleware(response)
     }
     
     // MARK: - Credits
