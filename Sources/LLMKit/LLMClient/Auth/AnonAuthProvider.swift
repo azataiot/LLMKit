@@ -15,7 +15,7 @@ struct AnonAuthProvider {
     
     func anonAuth(bundleID: String) async throws -> String {
         let token = try await requestDeviceToken()
-  
+
         let anonID = AnonIdentityManager.loadOrCreateAnonID(for: bundleID)
 
         let body = AnonAuthRequest(

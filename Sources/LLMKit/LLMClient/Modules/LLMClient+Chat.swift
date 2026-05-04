@@ -15,7 +15,9 @@ extension LLMClient {
         model: SupportedModel,
         system: String? = nil,
         text: String,
-        metadata: Metadata? = EmptyMetadata()
+        metadata: Metadata? = EmptyMetadata(),
+        agentID: String? = nil,
+        tools: [ToolSchema]? = nil
     ) async throws -> APIResponse<ChatMessageContent> {
         try await networking.post(
             "/chat",
@@ -28,7 +30,9 @@ extension LLMClient {
                 ) + [
                     .init(role: .user, content: text)
                 ],
-                metadata: metadata
+                metadata: metadata,
+                agentID: agentID,
+                tools: tools
             )
         )
     }
@@ -36,11 +40,13 @@ extension LLMClient {
     public func chat<Metadata: Codable & Equatable & Sendable>(
         model: SupportedModel,
         messages: [ChatMessageContent],
-        metadata: Metadata? = EmptyMetadata()
+        metadata: Metadata? = EmptyMetadata(),
+        agentID: String? = nil,
+        tools: [ToolSchema]? = nil
     ) async throws -> APIResponse<ChatMessageContent> {
         try await networking.post(
             "/chat",
-            body: ChatRequest(model: model, messages: messages, metadata: metadata)
+            body: ChatRequest(model: model, messages: messages, metadata: metadata, agentID: agentID, tools: tools)
         )
     }
 
@@ -48,7 +54,9 @@ extension LLMClient {
         model: SupportedModel,
         system: String? = nil,
         text: String,
-        metadata: Metadata? = EmptyMetadata()
+        metadata: Metadata? = EmptyMetadata(),
+        agentID: String? = nil,
+        tools: [ToolSchema]? = nil
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
         try await networking.stream("/chat/stream", body: ChatRequest(
             model: model,
@@ -59,16 +67,20 @@ extension LLMClient {
             ) + [
                 .init(role: .user, content: text)
             ],
-            metadata: metadata
+            metadata: metadata,
+            agentID: agentID,
+            tools: tools
         ))
     }
 
     public func streamChat<Metadata: Codable & Equatable & Sendable>(
         model: SupportedModel,
         messages: [ChatMessageContent],
-        metadata: Metadata? = EmptyMetadata()
+        metadata: Metadata? = EmptyMetadata(),
+        agentID: String? = nil,
+        tools: [ToolSchema]? = nil
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
-        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: messages, metadata: metadata))
+        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: messages, metadata: metadata, agentID: agentID, tools: tools))
     }
     
 //    public func streamChat(

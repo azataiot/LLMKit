@@ -672,7 +672,7 @@ public final class StreamingStore<State: StreamingMessageState> {
         streams[id] = nil
     }
 
-    public func streamIfExists(for id: Conversation.ID) -> StreamingMessageState? {
+    public func streamIfExists(for id: Conversation.ID) -> (any StreamingMessageState)? {
         streams[id]
     }
 }

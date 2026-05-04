@@ -23,12 +23,12 @@ extension EnvironmentValues {
 }
 
 struct LLMStateObjectProvider: View {
-    var content: (LLMStatable) -> AnyView
+    var content: (any LLMStatable) -> AnyView
     
     init<Content: View>(
         llmClient: LLMClient,
         persistenceProvider: PersistenceProvider?,
-        @ViewBuilder content: @escaping (LLMStatable) -> Content
+        @ViewBuilder content: @escaping (any LLMStatable) -> Content
     ) {
         self._state = StateObject(
             wrappedValue: LLMStateObject(llmClient: llmClient, persistenceProvider: persistenceProvider)
@@ -47,12 +47,12 @@ struct LLMStateObjectProvider: View {
 
 @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
 struct LLMObservableStateProvider: View {
-    var content: (LLMStatable) -> AnyView
+    var content: (any LLMStatable) -> AnyView
     
     init<Content: View>(
         llmClient: LLMClient,
         persistenceProvider: PersistenceProvider?,
-        @ViewBuilder content: @escaping (LLMStatable) -> Content
+        @ViewBuilder content: @escaping (any LLMStatable) -> Content
     ) {
         self._state = State(
             initialValue: LLMState(llmClient: llmClient, persistenceProvider: persistenceProvider)
@@ -74,13 +74,13 @@ struct LLMStateProvider: View {
     var llmClient: LLMClient
     var persistenceProvider: PersistenceProvider?
     var lagacy: Bool
-    var content: (LLMStatable) -> AnyView
+    var content: (any LLMStatable) -> AnyView
 
     init<Content: View>(
         llmClient: LLMClient,
         persistenceProvider: PersistenceProvider?,
         lagacy: Bool = false,
-        @ViewBuilder content: @escaping (LLMStatable) -> Content
+        @ViewBuilder content: @escaping (any LLMStatable) -> Content
     ) {
         self.llmClient = llmClient
         self.persistenceProvider = persistenceProvider
@@ -114,13 +114,13 @@ public struct LLMClientProvider: ViewModifier {
     
     let logger = Logger(label: "LLMClientProvider")
 
-    var llmState: LLMStatable?
+    var llmState: (any LLMStatable)?
     let llmClient: LLMClient
     var persistenceProvider: PersistenceProvider?
     var lagacy: Bool
     
     internal init(
-        state: LLMStatable?,
+        state: (any LLMStatable)?,
         llmClient: LLMClient,
         persistenceProvider: PersistenceProvider?,
         lagacy: Bool = false
@@ -207,7 +207,7 @@ struct LLMClientProviderContent: ViewModifier {
     
     let logger = Logger(label: "LLMClientProvider")
     var llmClient: LLMClient
-    var state: LLMStatable
+    var state: any LLMStatable
     
     @State private var refreshCreditsPassthrough = PassthroughSubject<Void, Never>()
 
