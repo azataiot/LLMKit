@@ -411,6 +411,9 @@ extension LLMStatable {
             // 把上一条提交进对话历史。
             var streamingAssistantID: String?
             var committedIDs = Set<String>()
+            // 持有最近一次 yield 出来的 assistant chunk 原件 (含 usage)。
+            // streamState 只是 UI 投影没有 usage 字段, 提交时必须用 chunk 本身才不丢计费。
+            var lastAssistantContent: ChatMessageContent?
 
             func commitMessageIfNeeded(_ message: ChatMessage) {
                 guard !committedIDs.contains(message.id) else { return }
@@ -440,34 +443,20 @@ extension LLMStatable {
                     switch content.role {
                     case .tool:
                         // 切换流: 先把当前正在 stream 的 assistant 消息持久化 (如有), 再插入 tool 结果
-                        if let prevID = streamingAssistantID {
-                            // streamState 里已经有最后状态, 用它构造一条 committed message
-                            let streamState = self.streamingStore.stream(for: conversationID)
-                            let committed = ChatMessage.content(ChatMessageContent(
-                                id: prevID,
-                                role: .assistant,
-                                content: streamState.content.isEmpty ? nil : streamState.content,
-                                files: streamState.files,
-                                toolCalls: streamState.toolCalls.isEmpty ? nil : streamState.toolCalls
-                            ))
-                            commitMessageIfNeeded(committed)
-                            streamingAssistantID = nil
+                        if let prev = lastAssistantContent {
+                            commitMessageIfNeeded(.content(prev))
                         }
+                        lastAssistantContent = nil
+                        streamingAssistantID = nil
                         commitMessageIfNeeded(.content(content))
 
                     case .assistant:
-                        // 同 id 累加; 切 id 时提交前一条 streaming
-                        if let prev = streamingAssistantID, prev != content.id {
-                            let streamState = self.streamingStore.stream(for: conversationID)
-                            let committed = ChatMessage.content(ChatMessageContent(
-                                id: prev,
-                                role: .assistant,
-                                content: streamState.content.isEmpty ? nil : streamState.content,
-                                files: streamState.files,
-                                toolCalls: streamState.toolCalls.isEmpty ? nil : streamState.toolCalls
-                            ))
-                            commitMessageIfNeeded(committed)
+                        // 同 id 累加; 切 id 时提交前一条 streaming (用 chunk 原件, 含 usage)
+                        if let prev = lastAssistantContent, prev.id != content.id {
+                            commitMessageIfNeeded(.content(prev))
                         }
+                        // 持有最新 chunk; settlement 之后的 chunk 会带 usage, 覆盖即可
+                        lastAssistantContent = content
                         streamingAssistantID = content.id
 
                         let streamState = self.streamingStore.stream(for: conversationID)
