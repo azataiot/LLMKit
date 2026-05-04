@@ -361,7 +361,7 @@ extension LLMStatable {
             streamState.id = UUID().uuidString
             streamState.content = ""
             streamState.files = []
-            streamState.stepType = nil
+            streamState.toolCalls = []
             streamState.isFinished = false
         }
         
@@ -391,13 +391,18 @@ extension LLMStatable {
             //   - role=.assistant + toolCalls 非空 → 中间一轮(模型说话+决定调工具)
             //   - role=.tool                   → 工具执行结果
             //   - role=.assistant + 无 toolCalls → 终态(最终回复)
+            let llmClient = self.llmClient
             let responseStream = try await executor.execute(
                 conversationID: conversation.id,
                 agentConfig: conversation.agentConfig,
                 contextMessages: conversation.messages.contentMessages,
                 model: model,
                 metadata: metadata,
-                invocationContext: invocationContext
+                invocationContext: invocationContext,
+                toolResultTransformer: { toolMessage in
+                    // 工具产出的图片(base64) 自动走 R2, 跟 user message 同一条 prepareUploadFiles 路径
+                    try await llmClient.prepareUploadFiles(for: toolMessage)
+                }
             )
 
             // Consume the stream

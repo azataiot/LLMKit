@@ -11,7 +11,7 @@ import LLMCore
 public struct WebSearchTool: Tool {
     public let name: String
     public let description: String
-    public let parameters: ToolParameters
+    public let inputSchema: ToolInputSchema
 
     private let networking: LLMNetworking
 
@@ -23,8 +23,7 @@ public struct WebSearchTool: Tool {
         self.name = name
         self.description = description
         self.networking = client.networking
-        self.parameters = ToolParameters(
-            type: "object",
+        self.inputSchema = .parameters(ToolParameters(
             properties: [
                 "query": ParameterProperty(
                     type: "string",
@@ -32,16 +31,16 @@ public struct WebSearchTool: Tool {
                 )
             ],
             required: ["query"]
-        )
+        ))
     }
 
-    public func execute(_ input: String, context: (any ChatInvocationContext)?) async throws -> String {
+    public func execute(_ input: String, context: (any ChatInvocationContext)?) async throws -> ToolResult {
         let query = try parseQuery(from: input)
         let response: ToolExecutionResponse = try await networking.post(
             "/tools/web-search",
             body: ToolExecutionRequest(arguments: query)
         )
-        return response.result
+        return .text(response.result)
     }
 
     private func parseQuery(from input: String) throws -> String {
