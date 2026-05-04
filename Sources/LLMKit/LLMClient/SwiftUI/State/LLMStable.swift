@@ -385,11 +385,12 @@ extension LLMStatable {
 
             let conversation = self.conversations.value![index]
             let executor = AgentExecutor(llmProvider: llmClient, toolRegistry: toolRegistry)
-            var pendingAgentStep: ChatMessage?
 
-
-            // Use AgentExecutor for all interactions (handles both direct chat and agent steps)
-            // Execute returns a stream now
+            // Use AgentExecutor for all interactions (native tool-use; no separate onStep callback).
+            // 流里会拿到三种 ChatMessageContent:
+            //   - role=.assistant + toolCalls 非空 → 中间一轮(模型说话+决定调工具)
+            //   - role=.tool                   → 工具执行结果
+            //   - role=.assistant + 无 toolCalls → 终态(最终回复)
             let responseStream = try await executor.execute(
                 conversationID: conversation.id,
                 agentConfig: conversation.agentConfig,
@@ -397,99 +398,82 @@ extension LLMStatable {
                 model: model,
                 metadata: metadata,
                 invocationContext: invocationContext
-            ) { (stepData: AgentStep) in
-                let message = ChatMessage.agentStep(stepData)
-                await MainActor.run { [weak self] in
-                    guard let self = self else { return }
-                    if let pending = pendingAgentStep, pending.id == message.id {
-                        pendingAgentStep = message
-                    } else {
-                        if let previous = pendingAgentStep,
-                           let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
-                           !self.conversations.value![i].messages.contains(where: { $0.id == previous.id }) {
-                            self.conversations.transform {
-                                $0[i].messages.append(previous)
-                            }
-                        }
-                        pendingAgentStep = message
-                    }
+            )
 
-                    let streamState = self.streamingStore.stream(for: conversationID)
-                    streamState.id = message.id
-                    streamState.content = stepData.content
-                    streamState.files = []
-                    streamState.stepType = stepData.type
-                    streamState.isFinished = false
+            // Consume the stream
+            var responseMessage: ChatMessage?
+            // 跟踪当前正在 stream 的 assistant 消息 id, 切到下一条 assistant / 收到 tool 结果时
+            // 把上一条提交进对话历史。
+            var streamingAssistantID: String?
+            var committedIDs = Set<String>()
 
-                    if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
-                       let loaddingMessageIndex = self.conversations.value![i].messages.firstIndex(
-                        where: { $0.id == loadingResponseMessage.id }
-                       ) {
-                        self.conversations.transform {
-                            $0[i].messages.remove(at: loaddingMessageIndex)
-                        }
-                    }
+            func commitMessageIfNeeded(_ message: ChatMessage) {
+                guard !committedIDs.contains(message.id) else { return }
+                committedIDs.insert(message.id)
+                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+                    self.conversations.transform { $0[i].messages.append(message) }
                 }
+            }
 
-                if let title = stepData.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !title.isEmpty {
-                    var shouldPersistTitle = false
-                    await MainActor.run {
-                        if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
-                           self.conversations.value?[i].title != title {
-                            self.conversations.transform {
-                                $0[i].title = title
-                            }
-                            shouldPersistTitle = true
-                        }
-                    }
-
-                    if shouldPersistTitle {
-                        do {
-                            try await self.persistenceProvider?.updateConversation(
-                                action: .update(conversationID, .updateTitle(title))
-                            )
-                        } catch {
-                            self.logger.error("Failed to update conversation title: \(error)")
-                        }
+            func removeLoadingIfPresent() {
+                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
+                   let loaddingIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == loadingResponseMessage.id }) {
+                    self.conversations.transform {
+                        $0[i].messages.remove(at: loaddingIndex)
                     }
                 }
             }
 
-            // Consume the stream
-            var responseMessage: ChatMessage?
-            var didAppendPendingStep = false
             for try await chatMessage in responseStream {
                 responseMessage = chatMessage
 
-                // Remove loading message on first response
-                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
-                   let loaddingMessageIndex = self.conversations.value![i].messages.firstIndex(where: {$0.id == loadingResponseMessage.id}) {
-                    await MainActor.run {
-                        self.conversations.transform {
-                            $0[i].messages.remove(at: loaddingMessageIndex)
-                        }
-                    }
-                }
+                guard case .content(let content) = chatMessage else { continue }
 
                 await MainActor.run {
-                    if case .content(let content) = chatMessage {
-                        if !didAppendPendingStep, let pending = pendingAgentStep,
-                           let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
-                           !self.conversations.value![i].messages.contains(where: { $0.id == pending.id }) {
-                            self.conversations.transform {
-                                $0[i].messages.append(pending)
-                            }
-                            pendingAgentStep = nil
-                            didAppendPendingStep = true
+                    removeLoadingIfPresent()
+
+                    switch content.role {
+                    case .tool:
+                        // 切换流: 先把当前正在 stream 的 assistant 消息持久化 (如有), 再插入 tool 结果
+                        if let prevID = streamingAssistantID {
+                            // streamState 里已经有最后状态, 用它构造一条 committed message
+                            let streamState = self.streamingStore.stream(for: conversationID)
+                            let committed = ChatMessage.content(ChatMessageContent(
+                                id: prevID,
+                                role: .assistant,
+                                content: streamState.content.isEmpty ? nil : streamState.content,
+                                files: streamState.files,
+                                toolCalls: streamState.toolCalls.isEmpty ? nil : streamState.toolCalls
+                            ))
+                            commitMessageIfNeeded(committed)
+                            streamingAssistantID = nil
                         }
+                        commitMessageIfNeeded(.content(content))
+
+                    case .assistant:
+                        // 同 id 累加; 切 id 时提交前一条 streaming
+                        if let prev = streamingAssistantID, prev != content.id {
+                            let streamState = self.streamingStore.stream(for: conversationID)
+                            let committed = ChatMessage.content(ChatMessageContent(
+                                id: prev,
+                                role: .assistant,
+                                content: streamState.content.isEmpty ? nil : streamState.content,
+                                files: streamState.files,
+                                toolCalls: streamState.toolCalls.isEmpty ? nil : streamState.toolCalls
+                            ))
+                            commitMessageIfNeeded(committed)
+                        }
+                        streamingAssistantID = content.id
 
                         let streamState = self.streamingStore.stream(for: conversationID)
                         streamState.id = content.id
                         streamState.content = content.content ?? ""
                         streamState.files = content.files ?? []
-                        streamState.stepType = nil
+                        streamState.toolCalls = content.toolCalls ?? []
                         streamState.isFinished = false
+
+                    default:
+                        break
                     }
                 }
             }
@@ -519,21 +503,13 @@ extension LLMStatable {
                     streamState.id = content.id
                     streamState.content = content.content ?? ""
                     streamState.files = content.files ?? []
-                    streamState.stepType = nil
+                    streamState.toolCalls = content.toolCalls ?? []
                     streamState.isFinished = true
                 }
             }
 
             await MainActor.run {
                 if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
-                    if let pendingAgentStep {
-                        let existingIds = Set(self.conversations.value![i].messages.map { $0.id })
-                        if !existingIds.contains(pendingAgentStep.id) {
-                            self.conversations.transform {
-                                $0[i].messages.append(pendingAgentStep)
-                            }
-                        }
-                    }
                     if let messageIndex = self.conversations.value![i].messages.firstIndex(where: { $0.id == transformedMessage.id }) {
                         self.conversations.transform {
                             $0[i].messages[messageIndex] = transformedMessage
@@ -683,8 +659,10 @@ public protocol StreamingMessageState: AnyObject, Identifiable {
 
     var content: String { get set }
     var files: [ChatMessageContent.File] { get set }
-    var stepType: AgentStep.StepType? { get set }
+    /// 当前正在 stream 的 assistant 消息是否带 tool calls。带 = 这一轮是中间步骤
+    /// (UI 可以渲染成"工具调用进行中"); 空 = 终态/纯回复。
+    var toolCalls: [ToolCall] { get set }
     var isFinished: Bool { get set }
-    
+
     init(conversationID: Conversation.ID)
 }

@@ -21,7 +21,8 @@ public final class LLMStreamingState: @MainActor StreamingMessageState {
     public var conversationID: Conversation.ID
     public var content: String
     public var files: [ChatMessageContent.File]
-    public var stepType: AgentStep.StepType?
+    /// 当前正在 stream 的 assistant 消息附带的 tool calls (空 = 终态/纯回复)。
+    public var toolCalls: [ToolCall]
     public var isFinished: Bool
 
     public init(conversationID: Conversation.ID) {
@@ -29,7 +30,7 @@ public final class LLMStreamingState: @MainActor StreamingMessageState {
         self.conversationID = conversationID
         self.content = ""
         self.files = []
-        self.stepType = nil
+        self.toolCalls = []
         self.isFinished = false
     }
 }

@@ -20,7 +20,8 @@ public final class LLMStreamingStateObject: ObservableObject, @MainActor Streami
     @Published public var conversationID: Conversation.ID
     @Published public var content: String
     @Published public var files: [ChatMessageContent.File]
-    @Published public var stepType: AgentStep.StepType?
+    /// 当前正在 stream 的 assistant 消息附带的 tool calls (空 = 终态/纯回复)。
+    @Published public var toolCalls: [ToolCall]
     @Published public var isFinished: Bool
 
     public init(conversationID: Conversation.ID) {
@@ -28,7 +29,7 @@ public final class LLMStreamingStateObject: ObservableObject, @MainActor Streami
         self.conversationID = conversationID
         self.content = ""
         self.files = []
-        self.stepType = nil
+        self.toolCalls = []
         self.isFinished = false
     }
 }
