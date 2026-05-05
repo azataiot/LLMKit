@@ -56,6 +56,13 @@ public final class LLMState:  @MainActor LLMStatable {
     public internal(set) var conversations: Loadable<[Conversation]> = .notRequested
     public internal(set) var streamingStore: StreamingStore<LLMStreamingState> = .init()
     public internal(set) var creditsInfo: CreditsInfo? = nil
+    var inflightTasks: [String: Task<Void, Error>] = [:]
+
+    /// 取消指定 conversation 当前正在跑的生成。Idempotent: 没有 in-flight 时是 no-op。
+    /// partial 已 commit 进 conversation.messages 的内容会被保留, 计费按已 settlement 的算。
+    public func cancelGeneration(conversationID: String) {
+        self._cancelGeneration(conversationID: conversationID)
+    }
 
     /// Computed property for backward compatibility
     public var credits: Double {

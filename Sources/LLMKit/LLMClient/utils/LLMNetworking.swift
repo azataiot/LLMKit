@@ -71,14 +71,22 @@ public actor LLMNetworking {
         let request = try makeRequest(endpoint: endpoint, method: "POST", body: body)
         
         return AsyncThrowingStream { continuation in
-            Task {
+            let producer = Task {
                 do {
                     let (bytes, response) = try await session.bytes(for: request)
-                    guard let http = response as? HTTPURLResponse,
-                          (200..<300).contains(http.statusCode) else {
-                        throw URLError(.badServerResponse)
+                    if let http = response as? HTTPURLResponse,
+                       !(200..<300).contains(http.statusCode) {
+                        // 非 2xx: 把 body 收完(错误响应通常很短的 JSON)再抛 LLMError,
+                        // 这样 402 / 401 / 429 等都能被调用方按 case 区分,
+                        // 且能拿到服务端 reason 用于日志。
+                        var bodyData = Data()
+                        for try await byte in bytes {
+                            bodyData.append(byte)
+                            if bodyData.count > 64 * 1024 { break }   // 4xx/5xx body 不应这么大
+                        }
+                        throw LLMError.fromHTTP(statusCode: http.statusCode, body: bodyData)
                     }
-                    
+
                     for try await line in bytes.lines {
                         // print("Received line: \(line)")
                         if line.hasPrefix("data: ") {
@@ -87,7 +95,7 @@ public actor LLMNetworking {
                                 continuation.finish()
                                 break
                             }
-                            
+
                             // 尝试解码成目标类型
                             if !jsonPart.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                                 let data = jsonPart.data(using: .utf8) {
@@ -100,13 +108,19 @@ public actor LLMNetworking {
                                 }
                             }
                         } else {
-                            
+
                         }
                     }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+            // Consumer 释放 stream 时取消 producer。producer 内的 URLSession.bytes 是
+            // cancellation-aware 的, Task.cancel 后它会立刻关 SSE 连接, 服务端
+            // onTermination 接力关 OpenRouter, 整条链路停。
+            continuation.onTermination = { @Sendable _ in
+                producer.cancel()
             }
         }
     }
@@ -155,27 +169,7 @@ public actor LLMNetworking {
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         if !(200..<300).contains(http.statusCode) {
-            // 尝试解码错误响应
-            do {
-                let errorResponse = try JSONDecoder().decode(ErrorResponse.self, from: data)
-                throw NSError(
-                    domain: "LLMNetworking",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: errorResponse.error.message]
-                )
-            } catch is DecodingError {
-                // 如果无法解码为标准错误格式，抛出通用错误
-                throw NSError(
-                    domain: "LLMNetworking",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
-                )
-            }
+            throw LLMError.fromHTTP(statusCode: http.statusCode, body: data)
         }
     }
-}
-
-// MARK: - Error Response Model
-private struct ErrorResponse: Codable {
-    let error: APIError
 }

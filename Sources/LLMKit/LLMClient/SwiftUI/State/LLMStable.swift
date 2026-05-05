@@ -14,16 +14,21 @@ import ChocofordEssentials
 @MainActor
 protocol LLMStatable: AnyObject {
     associatedtype StreamingState: StreamingMessageState
-    
+
     var logger: Logger { get }
     var llmClient: LLMClient { get }
     var toolRegistry: ToolRegistry { get }
     var isAuthenticated: Bool { get set }
     var conversations: Loadable<[Conversation]> { get set }
     var streamingStore: StreamingStore<StreamingState> { get set }
-    
+
     var creditsInfo: CreditsInfo? { get set }
     var persistenceProvider: PersistenceProvider? { get set }
+
+    /// 同一会话同时只允许一个 in-flight 生成, 注册的是 _sendMessage 的内层 Task,
+    /// `cancelGeneration(conversationID:)` 找到这个 Task 调 cancel(),
+    /// cancellation 沿 URLSession SSE 关闭传到服务端, 上游 OpenRouter 连接被关。
+    var inflightTasks: [String: Task<Void, Error>] { get set }
 
     /// Computed property for backward compatibility
     var credits: Double { get }
@@ -79,6 +84,14 @@ struct ConversationNotFoundError: Error {}
 extension LLMStatable {
     func updateCreditsInfo(_ creditsInfo: CreditsInfo) {
         self.creditsInfo = creditsInfo
+    }
+
+    /// 取消对应 conversation 当前的生成。partial 已 commit 的消息不会被回滚。
+    /// 计费按已收到的 settlement 算 (上游 OpenRouter 在断流前通常会回最后那条 usage chunk)。
+    public func _cancelGeneration(conversationID: String) {
+        guard let task = inflightTasks[conversationID] else { return }
+        task.cancel()
+        inflightTasks[conversationID] = nil
     }
     
     
@@ -335,6 +348,51 @@ extension LLMStatable {
         invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
+        // 把整个生成主体包成一个 child Task, 注册到 inflightTasks。cancelGeneration
+        // 时取消这个 Task → 内部 await 抛 CancellationError → URLSession SSE 关闭 →
+        // 服务端 onTermination 关 OpenRouter 连接。partial 已 commit 的消息保留。
+        let task = Task<Void, Error> { [weak self] in
+            guard let self else { return }
+            try await self._sendMessageBody(
+                to: conversationID,
+                model: model,
+                message: message,
+                stream: stream,
+                metadata: metadata,
+                invocationContext: invocationContext,
+                replyTransformer: replyTransformer
+            )
+        }
+        self.inflightTasks[conversationID] = task
+        defer { self.inflightTasks[conversationID] = nil }
+
+        do {
+            try await task.value
+        } catch is CancellationError {
+            // 用户主动取消, 不向上抛。loading 占位移除掉避免 UI 一直转。
+            await MainActor.run {
+                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+                    self.conversations.transform {
+                        $0[i].messages.removeAll(where: {
+                            if case .loading = $0 { return true } else { return false }
+                        })
+                    }
+                }
+            }
+            self.logger.info("sendMessage cancelled for conversation \(conversationID)")
+        }
+    }
+
+    /// 真正的发送主体, 以前是 _sendMessage 的整个 body, 现在被包到可取消的 child Task 里。
+    func _sendMessageBody<Metadata: Codable & Equatable & Sendable>(
+        to conversationID: String,
+        model: SupportedModel,
+        message: ChatMessage,
+        stream: Bool = true,
+        metadata: Metadata = EmptyMetadata(),
+        invocationContext: (any ChatInvocationContext)? = nil,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
+    ) async throws {
         guard case .loaded = conversations else {
             throw ConversationNotReadyError()
         }
@@ -342,7 +400,7 @@ extension LLMStatable {
         guard let index = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
             throw ConversationNotFoundError()
         }
-        
+
         await MainActor.run {
             self.conversations.transform {
                 $0[index].messages.append(message)
