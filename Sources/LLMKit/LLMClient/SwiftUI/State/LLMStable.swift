@@ -81,6 +81,15 @@ protocol LLMStatable: AnyObject {
 struct ConversationNotReadyError: Error {}
 struct ConversationNotFoundError: Error {}
 
+/// CancellationError 是 Swift Task cancel 的标准抛出, URLError(.cancelled) 是 URLSession
+/// 在被 cancel 时抛的 (异步 stream API 不一定包成 CancellationError)。两者都是用户主动
+/// 取消的语义, 应该一视同仁吞掉。
+fileprivate func isUserCancellationError(_ error: Error) -> Bool {
+    if error is CancellationError { return true }
+    if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+    return false
+}
+
 extension LLMStatable {
     func updateCreditsInfo(_ creditsInfo: CreditsInfo) {
         self.creditsInfo = creditsInfo
@@ -368,7 +377,7 @@ extension LLMStatable {
 
         do {
             try await task.value
-        } catch is CancellationError {
+        } catch let error where isUserCancellationError(error) {
             // 用户主动取消, 不向上抛。loading 占位移除掉避免 UI 一直转。
             await MainActor.run {
                 if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
@@ -382,6 +391,7 @@ extension LLMStatable {
             self.logger.info("sendMessage cancelled for conversation \(conversationID)")
         }
     }
+
 
     /// 真正的发送主体, 以前是 _sendMessage 的整个 body, 现在被包到可取消的 child Task 里。
     func _sendMessageBody<Metadata: Codable & Equatable & Sendable>(
@@ -529,6 +539,11 @@ extension LLMStatable {
                     }
                 }
             }
+
+            // Cancel race: stream 可能在 inner task 还没消费下一个 chunk 时被打断 finish()
+            // 而非 finish(throwing:), 这时下面的 guard 会拿到空 responseMessage 抛"No response"。
+            // 但语义上这是 cancel 不是真正的"agent 没回复", 主动抛 CancellationError 让外层吞掉。
+            try Task.checkCancellation()
 
             guard let finalMessage = responseMessage else {
                 throw NSError(domain: "LLMStatable", code: 4, userInfo: [NSLocalizedDescriptionKey: "No response received from agent"])
