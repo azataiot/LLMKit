@@ -41,13 +41,20 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
 
     let logger = Logger(label: "LLMStateObject")
     var llmClient: LLMClient
-    var toolRegistry: ToolRegistry
+    /// 暴露给外部只读: UI 渲染历史消息里的 toolCalls 时, 用它按 name 反查 Tool 拿 displayName。
+    public internal(set) var toolRegistry: ToolRegistry
     var persistenceProvider: (any PersistenceProvider)?
 
     public init(llmClient: LLMClient, toolRegistry: ToolRegistry = ToolRegistry(), persistenceProvider: PersistenceProvider?) {
         self.llmClient = llmClient
         self.toolRegistry = toolRegistry
         self.persistenceProvider = persistenceProvider
+        // 默认 approval handler 桥到 publisher 模式 (详见 LLMState.init 同段注释)。
+        self.toolApprovalHandler = nil
+        self.toolApprovalHandler = { [weak self] request in
+            guard let self else { return .deny(reason: "client gone") }
+            return await self.awaitApprovalDecision(request)
+        }
     }
 
     @Published public internal(set) var isAuthenticated: Bool = false
@@ -60,10 +67,60 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
 
     var inflightTasks: [String: Task<Void, Error>] = [:]
 
+    /// 当前等待 approval 的请求。SwiftUI 用 `.sheet(item: ...)` 监听 (用 ObservedObject 投影)。
+    @Published public internal(set) var pendingApprovalRequest: ToolApprovalRequest?
+
+    private var pendingApprovalContinuation: CheckedContinuation<ToolApprovalDecision, Never>?
+
+    /// 客户端 UI 弹完 approval sheet 后调这个返回决策。
+    public func respondToApproval(_ decision: ToolApprovalDecision) {
+        pendingApprovalContinuation?.resume(returning: decision)
+        pendingApprovalContinuation = nil
+        pendingApprovalRequest = nil
+    }
+
+    /// Tool approval handler。默认 bridge 到 publisher 模式; 高级场景可重赋值。
+    public var toolApprovalHandler: ToolApprovalHandler?
+
+    /// Bridge 函数: 把 closure handler 转成 publisher 模式 + cancel-aware cleanup。
+    private func awaitApprovalDecision(_ request: ToolApprovalRequest) async -> ToolApprovalDecision {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<ToolApprovalDecision, Never>) in
+                self.pendingApprovalContinuation = continuation
+                self.pendingApprovalRequest = request
+            }
+        } onCancel: {
+            Task { @MainActor in
+                self.pendingApprovalContinuation?.resume(returning: .deny(reason: "cancelled"))
+                self.pendingApprovalContinuation = nil
+                self.pendingApprovalRequest = nil
+            }
+        }
+    }
+
     /// 取消指定 conversation 当前正在跑的生成。Idempotent: 没有 in-flight 时是 no-op。
     /// partial 已 commit 进 conversation.messages 的内容会被保留, 计费按已 settlement 的算。
     public func cancelGeneration(conversationID: String) {
         self._cancelGeneration(conversationID: conversationID)
+    }
+
+    /// 把会话截断到指定 message。inclusive=true 连同 fromMessageID 自身一起删, false 只删它之后的。
+    /// 内部会先 cancel 当前 in-flight 生成。
+    public func truncateConversation(
+        in conversationID: String,
+        fromMessageID: String,
+        inclusive: Bool
+    ) async throws {
+        try await self._truncateConversation(
+            in: conversationID,
+            fromMessageID: fromMessageID,
+            inclusive: inclusive
+        )
+    }
+
+    /// 清空会话内容, 保留 system message。完全重置请用 deleteConversation + createConversation。
+    public func clearConversation(_ conversationID: String) async throws {
+        try await self._clearConversation(conversationID)
     }
 
     /// Computed property for backward compatibility

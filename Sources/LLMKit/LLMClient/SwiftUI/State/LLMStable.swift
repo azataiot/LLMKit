@@ -30,6 +30,10 @@ protocol LLMStatable: AnyObject {
     /// cancellation 沿 URLSession SSE 关闭传到服务端, 上游 OpenRouter 连接被关。
     var inflightTasks: [String: Task<Void, Error>] { get set }
 
+    /// Tool approval handler: tool 声明 `requiresApproval` 时, 执行前 raise 给客户端弹 UI 等决策。
+    /// nil = 自动 approve (向后兼容)。客户端 closure 内部自己负责 UI、cancel 响应、跨会话持久化。
+    var toolApprovalHandler: ToolApprovalHandler? { get set }
+
     /// Computed property for backward compatibility
     var credits: Double { get }
     
@@ -80,6 +84,7 @@ protocol LLMStatable: AnyObject {
 }
 struct ConversationNotReadyError: Error {}
 struct ConversationNotFoundError: Error {}
+struct ChatMessageNotFoundError: Error {}
 
 /// CancellationError 是 Swift Task cancel 的标准抛出, URLError(.cancelled) 是 URLSession
 /// 在被 cancel 时抛的 (异步 stream API 不一定包成 CancellationError)。两者都是用户主动
@@ -93,6 +98,83 @@ fileprivate func isUserCancellationError(_ error: Error) -> Bool {
 extension LLMStatable {
     func updateCreditsInfo(_ creditsInfo: CreditsInfo) {
         self.creditsInfo = creditsInfo
+    }
+
+    /// 在 truncate/clear 这种结构性修改前调一下: cancel 当前生成 + 等任务真正退出再继续,
+    /// 避免 in-flight Task 跟我们这边修改 conversations 同时写 race。
+    /// `_cancelGeneration` 是 fire-and-forget (UI cancel 按钮用), 这里要等。
+    fileprivate func cancelAndAwait(conversationID: String) async {
+        guard let task = inflightTasks[conversationID] else { return }
+        task.cancel()
+        _ = try? await task.value
+        inflightTasks[conversationID] = nil
+    }
+
+    /// 把会话截断到指定 message。inclusive=true 时连同 fromMessageID 自身一起删,
+    /// false 时只删它之后的。常用于"在这条消息处重新生成 / 分支"场景。
+    /// 截断前会先 cancel 当前 in-flight 生成 (如果有), 等它停稳再修改。
+    func _truncateConversation(
+        in conversationID: String,
+        fromMessageID: String,
+        inclusive: Bool
+    ) async throws {
+        guard case .loaded = conversations else { throw ConversationNotReadyError() }
+        guard let convIndex = conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
+            throw ConversationNotFoundError()
+        }
+        guard let msgIndex = conversations.value?[convIndex].messages.firstIndex(where: { $0.id == fromMessageID }) else {
+            throw ChatMessageNotFoundError()
+        }
+
+        await cancelAndAwait(conversationID: conversationID)
+
+        let cutIndex = inclusive ? msgIndex : msgIndex + 1
+        let messagesToRemove = Array(conversations.value![convIndex].messages[cutIndex...])
+        let removedIDs = messagesToRemove.map(\.id)
+
+        await MainActor.run {
+            self.conversations.transform {
+                $0[convIndex].messages.removeSubrange(cutIndex...)
+            }
+        }
+
+        if !removedIDs.isEmpty {
+            try await persistenceProvider?.updateConversation(
+                action: .update(conversationID, .delete(removedIDs))
+            )
+        }
+    }
+
+    /// 清空会话内容, 但**保留 system message** (它是 conversation 配置的一部分,
+    /// 没了下次发送会拿不到 prompt)。想完全重置请用 deleteConversation + createConversation。
+    func _clearConversation(_ conversationID: String) async throws {
+        guard case .loaded = conversations else { throw ConversationNotReadyError() }
+        guard let convIndex = conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
+            throw ConversationNotFoundError()
+        }
+
+        await cancelAndAwait(conversationID: conversationID)
+
+        let messages = conversations.value![convIndex].messages
+        let removedIDs = messages.compactMap { msg -> String? in
+            if case .content(let c) = msg, c.role == .system { return nil }
+            return msg.id
+        }
+
+        await MainActor.run {
+            self.conversations.transform {
+                $0[convIndex].messages.removeAll { msg in
+                    if case .content(let c) = msg, c.role == .system { return false }
+                    return true
+                }
+            }
+        }
+
+        if !removedIDs.isEmpty {
+            try await persistenceProvider?.updateConversation(
+                action: .update(conversationID, .delete(removedIDs))
+            )
+        }
     }
 
     /// 取消对应 conversation 当前的生成。partial 已 commit 的消息不会被回滚。
@@ -460,6 +542,7 @@ extension LLMStatable {
             //   - role=.tool                   → 工具执行结果
             //   - role=.assistant + 无 toolCalls → 终态(最终回复)
             let llmClient = self.llmClient
+            let approvalHandler = self.toolApprovalHandler
             let responseStream = try await executor.execute(
                 conversationID: conversation.id,
                 agentConfig: conversation.agentConfig,
@@ -470,7 +553,8 @@ extension LLMStatable {
                 toolResultTransformer: { toolMessage in
                     // 工具产出的图片(base64) 自动走 R2, 跟 user message 同一条 prepareUploadFiles 路径
                     try await llmClient.prepareUploadFiles(for: toolMessage)
-                }
+                },
+                toolApprovalHandler: approvalHandler
             )
 
             // Consume the stream
