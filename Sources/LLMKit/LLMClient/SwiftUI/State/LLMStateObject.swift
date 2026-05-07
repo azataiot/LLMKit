@@ -140,7 +140,7 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
 
     public func createConversation<Metadata: Codable & Equatable & Sendable>(
         id: String,
-        type: Conversation.ConversationTpye = .normal,
+        type: Conversation.ConversationTpye = .regular,
         model: SupportedModel,
         agentConfig: AgentConfig = .chat,
         appendingPrompt: String? = nil,

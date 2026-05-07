@@ -215,7 +215,7 @@ extension LLMStatable {
 
     func _createConversation<Metadata: Codable & Equatable & Sendable>(
         id: String,
-        type: Conversation.ConversationTpye = .normal,
+        type: Conversation.ConversationTpye = .regular,
         model: SupportedModel,
         agentConfig: AgentConfig = .chat,
         appendingPrompt: String? = nil,

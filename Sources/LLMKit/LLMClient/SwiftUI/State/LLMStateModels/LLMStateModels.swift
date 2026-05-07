@@ -17,32 +17,33 @@ public struct Conversation: Identifiable, Codable, Equatable, Sendable {
     public var id: String = UUID().uuidString
     
     public enum ConversationTpye: Codable, Equatable, Sendable {
-        case normal
+        case regular
         case temporary
         case custom(_ label: String)
-        
+
         public var rawValue: String {
             switch self {
-                case .normal:
-                    "normal"
+                case .regular:
+                    "regular"
                 case .temporary:
                     "temporary"
                 case .custom(let label):
                     label
             }
         }
-        
+
         public func encode(to encoder: any Encoder) throws {
             var container = encoder.singleValueContainer()
             try container.encode(rawValue)
         }
-        
+
         public init(from decoder: any Decoder) throws {
             let container = try decoder.singleValueContainer()
             let value = try container.decode(String.self)
-            
-            if value == "normal" {
-                self = .normal
+
+            // "normal" 是历史遗留值, 改名 regular 后仍接受旧数据 decode, 避免存量持久化数据迁移问题
+            if value == "regular" || value == "normal" {
+                self = .regular
             } else if value == "temporary" {
                 self = .temporary
             } else {
