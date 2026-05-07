@@ -132,6 +132,21 @@ public final class LLMState:  @MainActor LLMStatable {
         try await self._clearConversation(conversationID)
     }
 
+    /// 把会话当前所有活跃历史压缩成一段摘要, 节省 LLM context 用量。
+    /// 全部非-system 消息标 isCompactedOut, 末尾追加 user role 摘要消息;
+    /// 下次发消息时 LLM 看到的就是 [system, summary, 新提问]。
+    /// 调用前会 cancel 当前 in-flight 生成, 等它停稳再压。
+    /// - Parameter summaryModel: 用什么 model 跑摘要 (建议便宜 model, 如 gpt4oMini / haiku)
+    public func compactConversation(
+        _ conversationID: String,
+        summaryModel: SupportedModel = .gpt4oMini
+    ) async throws {
+        try await self._compactConversation(
+            conversationID,
+            summaryModel: summaryModel
+        )
+    }
+
     /// Computed property for backward compatibility
     public var credits: Double {
         creditsInfo?.balance ?? 0

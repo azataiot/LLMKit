@@ -145,6 +145,131 @@ extension LLMStatable {
         }
     }
 
+    /// 把会话当前所有活跃历史压缩成一段摘要: 全部非-system 消息标 `isCompactedOut`,
+    /// 在 messages 末尾追加一条 `isCompactSummary` 的 user role 摘要。
+    /// 下次 sendMessage 时, contextMessages = [system, summary, 新发的消息], 干净简洁。
+    /// 多次 compact 时旧 summary 也会被新一轮一起压进新 summary, 自然堆叠收敛。
+    func _compactConversation(
+        _ conversationID: String,
+        summaryModel: SupportedModel
+    ) async throws {
+        guard case .loaded = conversations else { throw ConversationNotReadyError() }
+        guard let convIndex = conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
+            throw ConversationNotFoundError()
+        }
+
+        await cancelAndAwait(conversationID: conversationID)
+
+        let messages = conversations.value![convIndex].messages
+
+        // 当前活跃非-system 消息全部压。一刀切, 不切割也就不存在 tool_use / tool_result 配对问题。
+        var toCompactIndices: [Int] = []
+        for (i, msg) in messages.enumerated() {
+            guard case .content(let c) = msg, !c.isCompactedOut else { continue }
+            if c.role != .system {
+                toCompactIndices.append(i)
+            }
+        }
+
+        guard !toCompactIndices.isEmpty else {
+            self.logger.info("compact: nothing to compact for \(conversationID)")
+            return
+        }
+
+        let toCompactContents = toCompactIndices.compactMap { i -> ChatMessageContent? in
+            if case .content(let c) = messages[i] { return c }
+            return nil
+        }
+
+        // 调便宜 model 生成 summary。这次调用本身不在 conversation 上下文里, 不影响主对话。
+        let summaryText = try await self.generateCompactSummary(
+            messages: toCompactContents,
+            model: summaryModel
+        )
+
+        // 摘要消息: role=.user (避免冲淡主 system prompt), content 带前缀让模型识别;
+        // isCompactSummary=true 让 UI 区分渲染。
+        let summaryContent = ChatMessageContent(
+            role: .user,
+            content: "[Summary of earlier conversation]\n\n\(summaryText)",
+            isCompactSummary: true
+        )
+        let summaryMessage = ChatMessage.content(summaryContent)
+
+        await MainActor.run {
+            self.conversations.transform { convs in
+                // 1. 给被压的消息标 isCompactedOut
+                for i in toCompactIndices {
+                    if case .content(var c) = convs[convIndex].messages[i] {
+                        c.isCompactedOut = true
+                        convs[convIndex].messages[i] = .content(c)
+                    }
+                }
+                // 2. 在 messages 末尾追加 summary
+                convs[convIndex].messages.append(summaryMessage)
+            }
+        }
+
+        // 持久化: 更新被改的消息 + 追加 summary
+        if let provider = persistenceProvider {
+            let updatedMessages = self.conversations.value![convIndex].messages
+            for i in toCompactIndices {
+                try await provider.updateConversation(
+                    action: .update(conversationID, .update(updatedMessages[i]))
+                )
+            }
+            try await provider.updateConversation(
+                action: .update(conversationID, .insert([summaryMessage]))
+            )
+        }
+    }
+
+    /// 用便宜 model 单独发一次 chat (不进 agent loop / 不进当前 conversation 上下文) 生成
+    /// "earlier conversation"摘要。返回纯文本, 调用方负责包成 isCompactSummary 消息。
+    private func generateCompactSummary(
+        messages: [ChatMessageContent],
+        model: SupportedModel
+    ) async throws -> String {
+        let systemPrompt = """
+        You are summarizing a conversation between a user and an assistant for context compression.
+        Output a concise summary in 3-8 bullet points covering:
+        - Key user goals and requests
+        - Major decisions / approaches taken
+        - Files / entities / state that were discussed or modified
+        - Open questions or pending items
+
+        Do NOT include filler, preamble, or follow-up suggestions. Output only the bulleted summary.
+        """
+
+        // 序列化成 LLM 可读的对话稿 (限制 toolCall arguments 长度避免 prompt 爆掉)
+        let conversationText = messages.map { msg -> String in
+            let label = "[\(msg.role.rawValue)]"
+            var parts: [String] = []
+            if let content = msg.content, !content.isEmpty {
+                parts.append(content)
+            }
+            if let toolCalls = msg.toolCalls, !toolCalls.isEmpty {
+                let calls = toolCalls.map { "tool_call \($0.name)(\($0.arguments.prefix(200)))" }
+                parts.append(calls.joined(separator: ", "))
+            }
+            return "\(label) \(parts.joined(separator: " "))"
+        }.joined(separator: "\n\n")
+
+        let response = try await llmClient.chat(
+            model: model,
+            system: systemPrompt,
+            text: "Conversation to summarize:\n\n\(conversationText)"
+        )
+        guard let summary = response.data?.content, !summary.isEmpty else {
+            throw NSError(
+                domain: "LLMStatable",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "LLM returned empty compact summary"]
+            )
+        }
+        return summary
+    }
+
     /// 清空会话内容, 但**保留 system message** (它是 conversation 配置的一部分,
     /// 没了下次发送会拿不到 prompt)。想完全重置请用 deleteConversation + createConversation。
     func _clearConversation(_ conversationID: String) async throws {
@@ -546,7 +671,8 @@ extension LLMStatable {
             let responseStream = try await executor.execute(
                 conversationID: conversation.id,
                 agentConfig: conversation.agentConfig,
-                contextMessages: conversation.messages.contentMessages,
+                // contextMessages 已经过滤掉 isCompactedOut 的旧消息, 只发当前活跃上下文 (system + summary + 最近 N 条)
+                contextMessages: conversation.messages.contextMessages,
                 model: model,
                 metadata: metadata,
                 invocationContext: invocationContext,

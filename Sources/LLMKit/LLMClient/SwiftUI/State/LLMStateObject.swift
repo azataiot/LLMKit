@@ -123,6 +123,17 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
         try await self._clearConversation(conversationID)
     }
 
+    /// 把会话当前所有活跃历史压缩成一段摘要, 节省 LLM context 用量。
+    public func compactConversation(
+        _ conversationID: String,
+        summaryModel: SupportedModel = .gpt4oMini
+    ) async throws {
+        try await self._compactConversation(
+            conversationID,
+            summaryModel: summaryModel
+        )
+    }
+
     /// Computed property for backward compatibility
     public var credits: Double {
         creditsInfo?.balance ?? 0
