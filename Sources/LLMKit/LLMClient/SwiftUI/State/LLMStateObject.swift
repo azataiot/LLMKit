@@ -184,15 +184,20 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
         context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
-        try await self._sendMessage(
-            to: conversationID,
-            model: model,
-            message: message,
-            stream: stream,
-            metadata: metadata,
-            invocationContext: invocationContext,
-            replyTransformer: replyTransformer
-        )
+        // 双层 catch: 即便 _sendMessage 内部 cancel 路径有遗漏, 这里也兜底吞掉用户取消错误。
+        do {
+            try await self._sendMessage(
+                to: conversationID,
+                model: model,
+                message: message,
+                stream: stream,
+                metadata: metadata,
+                invocationContext: invocationContext,
+                replyTransformer: replyTransformer
+            )
+        } catch let error where isUserCancellationError(error) {
+            // 静默吞用户取消
+        }
     }
 
     public func regenerateMessage<Metadata: Codable & Equatable & Sendable>(
@@ -204,15 +209,43 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
         context invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
-        try await self._regenerateMessage(
-            in: conversationID,
-            fromMessageID: fromMessageID,
-            model: model,
-            stream: stream,
-            metadata: metadata,
-            invocationContext: invocationContext,
-            replyTransformer: replyTransformer
-        )
+        do {
+            try await self._regenerateMessage(
+                in: conversationID,
+                fromMessageID: fromMessageID,
+                model: model,
+                stream: stream,
+                metadata: metadata,
+                invocationContext: invocationContext,
+                replyTransformer: replyTransformer
+            )
+        } catch let error where isUserCancellationError(error) {
+            // 静默吞用户取消
+        }
+    }
+
+    /// 程序错误后让 agent 在现有历史上接着跑。会先把末尾的 `.error` stub 删掉, 然后跑一轮新的 agent loop。
+    /// 末尾不是 `.error` 的对话上调用会抛错 (UI 不该让用户在没失败的对话上点这个)。
+    public func resumeGeneration<Metadata: Codable & Equatable & Sendable>(
+        in conversationID: String,
+        model: SupportedModel,
+        stream: Bool = true,
+        metadata: Metadata = EmptyMetadata(),
+        context invocationContext: (any ChatInvocationContext)? = nil,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
+    ) async throws {
+        do {
+            try await self._resumeGeneration(
+                in: conversationID,
+                model: model,
+                stream: stream,
+                metadata: metadata,
+                invocationContext: invocationContext,
+                replyTransformer: replyTransformer
+            )
+        } catch let error where isUserCancellationError(error) {
+            // 静默吞用户取消
+        }
     }
 
     public func temporaryChat(

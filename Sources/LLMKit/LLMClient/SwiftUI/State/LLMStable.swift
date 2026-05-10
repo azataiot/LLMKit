@@ -89,7 +89,9 @@ struct ChatMessageNotFoundError: Error {}
 /// CancellationError 是 Swift Task cancel 的标准抛出, URLError(.cancelled) 是 URLSession
 /// 在被 cancel 时抛的 (异步 stream API 不一定包成 CancellationError)。两者都是用户主动
 /// 取消的语义, 应该一视同仁吞掉。
-fileprivate func isUserCancellationError(_ error: Error) -> Bool {
+/// 提到 internal 让 LLMState / LLMStateObject 的 public 方法也能在最外层 catch 兜底,
+/// 即便 _xxx 内部 cancel 路径有遗漏, 调用方也不会拿到 CancellationError。
+internal func isUserCancellationError(_ error: Error) -> Bool {
     if error is CancellationError { return true }
     if let urlError = error as? URLError, urlError.code == .cancelled { return true }
     return false
@@ -564,9 +566,13 @@ extension LLMStatable {
         invocationContext: (any ChatInvocationContext)? = nil,
         replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
     ) async throws {
-        // 把整个生成主体包成一个 child Task, 注册到 inflightTasks。cancelGeneration
-        // 时取消这个 Task → 内部 await 抛 CancellationError → URLSession SSE 关闭 →
-        // 服务端 onTermination 关 OpenRouter 连接。partial 已 commit 的消息保留。
+        // 把整个生成主体包成一个 child Task, 注册到 inflightTasks。两条 cancel 路径都覆盖:
+        //   1. llmState.cancelGeneration(conversationID:) → _cancelGeneration → task.cancel()
+        //   2. 调用方自己 outerTask.cancel() → cancellation 沿 await 链路传到这里 →
+        //      withTaskCancellationHandler.onCancel 把它桥接到 inner task.cancel()
+        // 任意一条触发都能让 inner task 内部 await 抛 CancellationError, 进入下面 catch 静默吞。
+        // 没这个 handler 时, outer cancel 在 sendMessage 的 entry await 直接 rethrow 给调用方,
+        // 客户端 catch 到 CancellationError print 出"The operation couldn't be completed..."。
         let task = Task<Void, Error> { [weak self] in
             guard let self else { return }
             try await self._sendMessageBody(
@@ -583,7 +589,11 @@ extension LLMStatable {
         defer { self.inflightTasks[conversationID] = nil }
 
         do {
-            try await task.value
+            try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
         } catch let error where isUserCancellationError(error) {
             // 用户主动取消, 不向上抛。loading 占位移除掉避免 UI 一直转。
             await MainActor.run {
@@ -601,6 +611,8 @@ extension LLMStatable {
 
 
     /// 真正的发送主体, 以前是 _sendMessage 的整个 body, 现在被包到可取消的 child Task 里。
+    /// 这一层只负责"把新 user message 落到 conversation.messages", 然后委托给共享的 `_runAgentLoop`。
+    /// resume 路径走同一个 `_runAgentLoop` 但跳过"append message"步骤。
     func _sendMessageBody<Metadata: Codable & Equatable & Sendable>(
         to conversationID: String,
         model: SupportedModel,
@@ -618,12 +630,48 @@ extension LLMStatable {
             throw ConversationNotFoundError()
         }
 
+        // 在 append 之前抓 anchor: 持久化时从这里 suffix 拿"用户消息 + 这次 agent run 产出的所有消息"。
+        let persistFromIndex = self.conversations.value![index].messages.count
+
         await MainActor.run {
             self.conversations.transform {
                 $0[index].messages.append(message)
             }
         }
-        
+
+        try await _runAgentLoop(
+            in: conversationID,
+            persistFromIndex: persistFromIndex,
+            model: model,
+            stream: stream,
+            metadata: metadata,
+            invocationContext: invocationContext,
+            replyTransformer: replyTransformer
+        )
+    }
+
+    /// 共享的 agent 跑动主体: 装 loading placeholder → 上传文件 → 跑 AgentExecutor → 消费流 → 持久化。
+    /// 失败时把 loading 占位删掉、追加 `.error` stub、再 rethrow。
+    /// `persistFromIndex` 是持久化锚点 — 持久化时只存 `messages[persistFromIndex..<end]` 这一段。
+    /// - sendMessage 传"append user message 之前的 count" → 持久化覆盖 user message + agent 全部输出
+    /// - resumeGeneration 传"resume 启动时的 count" → 持久化只覆盖这次 resume 新跑出来的部分
+    func _runAgentLoop<Metadata: Codable & Equatable & Sendable>(
+        in conversationID: String,
+        persistFromIndex: Int,
+        model: SupportedModel,
+        stream: Bool,
+        metadata: Metadata,
+        invocationContext: (any ChatInvocationContext)?,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)?
+    ) async throws {
+        guard case .loaded = conversations else {
+            throw ConversationNotReadyError()
+        }
+
+        guard let index = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
+            throw ConversationNotFoundError()
+        }
+
         let loadingResponseMessage = ChatMessage.loading()
         let canStream = model.supportsStreaming
         await MainActor.run {
@@ -639,24 +687,24 @@ extension LLMStatable {
             streamState.toolCalls = []
             streamState.isFinished = false
         }
-        
+
         do {
             // Upload files if any
             let conversationAfterUploading = try await llmClient.prepareUploadFiles(
                 for: self.conversations.value![index]
             )
-            
+
             await MainActor.run {
                 self.conversations.transform {
                     $0[index] = conversationAfterUploading
                 }
             }
-            
-            logger.info("Sending message to conversation \(conversationID), model: \(model.rawValue), stream: \(stream), canStream: \(canStream)")
+
+            logger.info("Running agent loop for conversation \(conversationID), model: \(model.rawValue), stream: \(stream), canStream: \(canStream)")
             for message in self.conversations.value![index].messages.contentMessages {
                 logger.info("- \(String(describing: message).prefix(1024))")
             }
-            logger.info("Sending message end")
+            logger.info("Running agent loop end")
 
             let conversation = self.conversations.value![index]
             let executor = AgentExecutor(llmProvider: llmClient, toolRegistry: toolRegistry)
@@ -718,6 +766,17 @@ extension LLMStatable {
                 await MainActor.run {
                     removeLoadingIfPresent()
 
+                    // 增量更新余额: 每收到一条带 usage 的 assistant chunk 立即刷, 不等流结束。
+                    // 这样即便后续 throw (maxThoughtsReached / 网络中断 / cancel),
+                    // 余额 widget 也能反映已确认扣款的最新值。
+                    if let creditsResult = content.usage {
+                        self.updateCreditsInfo(CreditsInfo(
+                            balance: creditsResult.remains,
+                            subscription: nil,
+                            purchasedCredits: 0
+                        ))
+                    }
+
                     switch content.role {
                     case .tool:
                         // 切换流: 先把当前正在 stream 的 assistant 消息持久化 (如有), 再插入 tool 结果
@@ -759,21 +818,15 @@ extension LLMStatable {
                 throw NSError(domain: "LLMStatable", code: 4, userInfo: [NSLocalizedDescriptionKey: "No response received from agent"])
             }
 
-            // Extract and update credits from response
-            if case .content(let content) = finalMessage, let creditsResult = content.usage {
-                self.updateCreditsInfo(CreditsInfo(
-                    balance: creditsResult.remains,
-                    subscription: nil,
-                    purchasedCredits: 0
-                ))
-            }
-            
+            // 余额更新已经在 stream 消费过程中增量完成 (见上面 for-loop 里的 updateCreditsInfo),
+            // 这里不再补刷, 避免错误路径丢更新。
+
             // Apply transformer if provided
             var transformedMessage = finalMessage
             if let replyTransformer {
                 transformedMessage = try await replyTransformer(transformedMessage)
             }
-            
+
             if case .content(let content) = transformedMessage {
                 await MainActor.run {
                     let streamState = self.streamingStore.stream(for: conversationID)
@@ -800,12 +853,16 @@ extension LLMStatable {
                 self.streamingStore.removeStream(for: conversationID)
             }
 
-            // Persist all new messages (user message + agent steps + final response)
+            // Persist new messages from this run.
             if let i = conversations.value?.firstIndex(where: { $0.id == conversationID }) {
-                let newMessages = conversations.value![i].messages.suffix(from: conversations.value![i].messages.firstIndex(where: { $0.id == message.id }) ?? conversations.value![i].messages.endIndex)
-                try await persistenceProvider?.updateConversation(
-                    action: .update(conversationID, .insert(Array(newMessages)))
-                )
+                let messages = conversations.value![i].messages
+                let safeIndex = min(persistFromIndex, messages.endIndex)
+                let newMessages = Array(messages.suffix(from: safeIndex))
+                if !newMessages.isEmpty {
+                    try await persistenceProvider?.updateConversation(
+                        action: .update(conversationID, .insert(newMessages))
+                    )
+                }
             }
         } catch {
             if let loaddingMessageIndex = conversations.value![index].messages.firstIndex(where: {$0.id == loadingResponseMessage.id}) {
@@ -825,6 +882,95 @@ extension LLMStatable {
             }
             throw error
         }
+    }
+
+    /// 程序错误 (maxThoughtsReached / 网络中断 / 不可恢复 tool 失败) 后, 让 agent 在现有历史上接着跑。
+    /// 末尾必须是 `.error(...)` stub, 否则没东西可"续" — 直接抛错避免误用。
+    /// 跟 _sendMessage 一样, 包成 child Task 注册到 inflightTasks, cancel 路径完整覆盖。
+    func _resumeGeneration<Metadata: Codable & Equatable & Sendable>(
+        in conversationID: String,
+        model: SupportedModel,
+        stream: Bool = true,
+        metadata: Metadata = EmptyMetadata(),
+        invocationContext: (any ChatInvocationContext)? = nil,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)? = nil
+    ) async throws {
+        let task = Task<Void, Error> { [weak self] in
+            guard let self else { return }
+            try await self._resumeGenerationBody(
+                in: conversationID,
+                model: model,
+                stream: stream,
+                metadata: metadata,
+                invocationContext: invocationContext,
+                replyTransformer: replyTransformer
+            )
+        }
+        self.inflightTasks[conversationID] = task
+        defer { self.inflightTasks[conversationID] = nil }
+
+        do {
+            try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+        } catch let error where isUserCancellationError(error) {
+            await MainActor.run {
+                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+                    self.conversations.transform {
+                        $0[i].messages.removeAll(where: {
+                            if case .loading = $0 { return true } else { return false }
+                        })
+                    }
+                }
+            }
+            self.logger.info("resumeGeneration cancelled for conversation \(conversationID)")
+        }
+    }
+
+    func _resumeGenerationBody<Metadata: Codable & Equatable & Sendable>(
+        in conversationID: String,
+        model: SupportedModel,
+        stream: Bool,
+        metadata: Metadata,
+        invocationContext: (any ChatInvocationContext)?,
+        replyTransformer: ((_ assistantMessage: ChatMessage) async throws -> ChatMessage)?
+    ) async throws {
+        guard case .loaded = conversations else {
+            throw ConversationNotReadyError()
+        }
+
+        guard let index = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
+            throw ConversationNotFoundError()
+        }
+
+        // 必须末尾是 .error 才能 resume — 没失败的对话不允许"接着跑"。
+        // .error stub 是 UI-only (不持久化), 直接 removeLast 即可, 不需要同步 persistence delete。
+        guard case .error = self.conversations.value![index].messages.last else {
+            throw NSError(
+                domain: "LLMStatable",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "Nothing to resume — conversation does not end with an error."]
+            )
+        }
+        await MainActor.run {
+            self.conversations.transform { $0[index].messages.removeLast() }
+        }
+
+        // 删完 error stub 之后的 count 就是这次 resume 的持久化锚点 —
+        // 之后 _runAgentLoop 跑出来的所有新消息都从这里 suffix 拿。
+        let persistFromIndex = self.conversations.value![index].messages.count
+
+        try await _runAgentLoop(
+            in: conversationID,
+            persistFromIndex: persistFromIndex,
+            model: model,
+            stream: stream,
+            metadata: metadata,
+            invocationContext: invocationContext,
+            replyTransformer: replyTransformer
+        )
     }
     
     func _refreshConversations() async {
