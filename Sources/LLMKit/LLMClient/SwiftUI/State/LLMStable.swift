@@ -102,6 +102,18 @@ extension LLMStatable {
         self.creditsInfo = creditsInfo
     }
 
+    /// 这条 message 是不是当前正在 stream (token 还在到来) 的那一条。
+    /// - 一个 conversation 同时只有一条 assistant chunk 在流, 不会多条命中。
+    /// - agent 多轮 loop 里, 上一轮 chunk 流完 (tool 结果到来) 后会被自动标完成, 不会假阳性。
+    /// - 整个 agent loop 收尾后 streamState 被 removeStream 清掉, 任何 message 都返回 false。
+    /// SwiftUI 渲染"打字 indicator"或"流式光标"时直接读这个就行, 不用自己拼 streamingStore 的 check。
+    func _isStreaming(messageID: String, in conversationID: String) -> Bool {
+        guard let stream = streamingStore.streamIfExists(for: conversationID) else {
+            return false
+        }
+        return stream.id == messageID && !stream.isFinished
+    }
+
     /// 在 truncate/clear 这种结构性修改前调一下: cancel 当前生成 + 等任务真正退出再继续,
     /// 避免 in-flight Task 跟我们这边修改 conversations 同时写 race。
     /// `_cancelGeneration` 是 fire-and-forget (UI cancel 按钮用), 这里要等。
@@ -682,10 +694,10 @@ extension LLMStatable {
         await MainActor.run {
             let streamState = self.streamingStore.stream(for: conversationID)
             streamState.id = UUID().uuidString
-            streamState.content = ""
-            streamState.files = []
-            streamState.toolCalls = []
             streamState.isFinished = false
+            // content/files/toolCalls 不再在 streamState 维护 — conversation.messages 是单一数据源,
+            // streamState 只用作 "isStreaming(messageID:in:) API 需要的 (id + isFinished) 指针"。
+            // 避免每帧 chunk 触发 5 个 @Published 字段 publish 累积出 100+/s 的无谓信号。
         }
 
         do {
@@ -733,18 +745,22 @@ extension LLMStatable {
 
             // Consume the stream
             var responseMessage: ChatMessage?
-            // 跟踪当前正在 stream 的 assistant 消息 id, 切到下一条 assistant / 收到 tool 结果时
-            // 把上一条提交进对话历史。
+            // 当前正在 stream 的 assistant 消息 id (UI 渲染光标 / 流式 indicator 时用)。
             var streamingAssistantID: String?
-            var committedIDs = Set<String>()
-            // 持有最近一次 yield 出来的 assistant chunk 原件 (含 usage)。
-            // streamState 只是 UI 投影没有 usage 字段, 提交时必须用 chunk 本身才不丢计费。
-            var lastAssistantContent: ChatMessageContent?
 
-            func commitMessageIfNeeded(_ message: ChatMessage) {
-                guard !committedIDs.contains(message.id) else { return }
-                committedIDs.insert(message.id)
-                if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+            // 把消息写入 conversation.messages: 已存在同 id 就 in-place update,
+            // 否则 append。流式中也走这条路 — assistant chunk 第一条进来 append, 后续 chunk 原地刷。
+            // 旧实现里有"buffer 在 lastAssistantContent + 切 id 时 commit"的延迟方案,
+            // 用来减少数组变动频率。改成实时写之后, conversation.messages 就是单一数据源,
+            // UI 不再需要去 streamingStore 拼内容。SwiftUI 的 ForEach id-based diff 只重 evaluate 变化的那一行,
+            // 实测够用; 如果发现性能问题再回退。
+            func upsertMessage(_ message: ChatMessage) {
+                guard let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
+                    return
+                }
+                if let msgIdx = self.conversations.value![i].messages.firstIndex(where: { $0.id == message.id }) {
+                    self.conversations.transform { $0[i].messages[msgIdx] = message }
+                } else {
                     self.conversations.transform { $0[i].messages.append(message) }
                 }
             }
@@ -779,29 +795,32 @@ extension LLMStatable {
 
                     switch content.role {
                     case .tool:
-                        // 切换流: 先把当前正在 stream 的 assistant 消息持久化 (如有), 再插入 tool 结果
-                        if let prev = lastAssistantContent {
-                            commitMessageIfNeeded(.content(prev))
-                        }
-                        lastAssistantContent = nil
+                        // tool 结果到达说明前一条 assistant chunk 已经流完了, 把 streamState 标完成 —
+                        // 否则在 tool 执行的这段空白里, isStreaming(prev assistant) 会假阳性。
+                        // 下一轮 assistant 进来时 streamState 会被重新置 false (case .assistant 末尾)。
+                        self.streamingStore.stream(for: conversationID).isFinished = true
                         streamingAssistantID = nil
-                        commitMessageIfNeeded(.content(content))
+                        // tool 消息整条到来一次, 走 upsert (实际上几乎总是走 append 分支)。
+                        upsertMessage(.content(content))
 
                     case .assistant:
-                        // 同 id 累加; 切 id 时提交前一条 streaming (用 chunk 原件, 含 usage)
-                        if let prev = lastAssistantContent, prev.id != content.id {
-                            commitMessageIfNeeded(.content(prev))
-                        }
-                        // 持有最新 chunk; settlement 之后的 chunk 会带 usage, 覆盖即可
-                        lastAssistantContent = content
+                        // 流式中实时写: 第一个 chunk → append, 后续同 id chunk → in-place update。
+                        // settlement 之后的 chunk 会带 usage, 同样走 in-place 覆盖, 计费信息不丢。
+                        upsertMessage(.content(content))
                         streamingAssistantID = content.id
 
+                        // streamState 只维护 (id + isFinished) 给 isStreaming() API 用。
+                        // 不再每帧覆写 content/files/toolCalls — 它们本来就是 conversation.messages 那条
+                        // 的镜像, 没有视图读, 写它们等于每帧浪费 5 倍 @Published publish (100+/s)。
                         let streamState = self.streamingStore.stream(for: conversationID)
-                        streamState.id = content.id
-                        streamState.content = content.content ?? ""
-                        streamState.files = content.files ?? []
-                        streamState.toolCalls = content.toolCalls ?? []
-                        streamState.isFinished = false
+                        if streamState.id != content.id {
+                            // 只在 id 真切到新一轮 chunk 时才写, 同 id 多 chunk 不重复 publish
+                            streamState.id = content.id
+                        }
+                        if streamState.isFinished {
+                            // 多轮中间 (上一轮已完成, 新一轮开始) 才需要从 true 翻回 false
+                            streamState.isFinished = false
+                        }
 
                     default:
                         break
@@ -831,10 +850,8 @@ extension LLMStatable {
                 await MainActor.run {
                     let streamState = self.streamingStore.stream(for: conversationID)
                     streamState.id = content.id
-                    streamState.content = content.content ?? ""
-                    streamState.files = content.files ?? []
-                    streamState.toolCalls = content.toolCalls ?? []
                     streamState.isFinished = true
+                    // content/files/toolCalls 不再 mirror — 单一数据源在 conversation.messages
                 }
             }
 
@@ -880,6 +897,26 @@ extension LLMStatable {
             await MainActor.run {
                 self.streamingStore.removeStream(for: conversationID)
             }
+
+            // 即便 cancel / 出错, 也持久化本轮已生成的部分:
+            // - partial assistant 在 in-place update 模式下已经在 messages 里, 内容是流式累积的快照
+            // - .error / .loading 在 ChatMessage.encode 时会被自动跳过, 不污染存储
+            // - 用 try? 而非 try await — 持久化失败不该掩盖原始 cancel/error, 这是 best-effort
+            // - 不另开 Task.detached: 大多数 persistenceProvider 不感知 task cancellation
+            //   (本地存储 / Core Data / 文件), 即使 task 已 cancel, await 仍能跑完。
+            //   如果实测发现某些 provider 在 cancel 后立即抛 CancellationError 导致写不进去,
+            //   再切到 detached 方案。
+            if let i = conversations.value?.firstIndex(where: { $0.id == conversationID }) {
+                let messages = conversations.value![i].messages
+                let safeIndex = min(persistFromIndex, messages.endIndex)
+                let newMessages = Array(messages.suffix(from: safeIndex))
+                if !newMessages.isEmpty {
+                    try? await persistenceProvider?.updateConversation(
+                        action: .update(conversationID, .insert(newMessages))
+                    )
+                }
+            }
+
             throw error
         }
     }

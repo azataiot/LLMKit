@@ -113,6 +113,13 @@ public final class LLMState:  @MainActor LLMStatable {
         self._cancelGeneration(conversationID: conversationID)
     }
 
+    /// 这条 message 是不是 conversation 里当前正在 stream 的那一条 (token 还在陆续到达)。
+    /// agent 多轮场景里只对"当前那一轮"为 true; 中间已流完等 tool 执行的那条会被自动标完成 (false)。
+    /// 整个 agent loop 收尾或失败之后, 任意 messageID 都返回 false。
+    public func isStreaming(messageID: String, in conversationID: String) -> Bool {
+        self._isStreaming(messageID: messageID, in: conversationID)
+    }
+
     /// 把会话截断到指定 message。inclusive=true 连同 fromMessageID 自身一起删, false 只删它之后的。
     /// 内部会先 cancel 当前 in-flight 生成。
     public func truncateConversation(
