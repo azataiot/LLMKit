@@ -47,10 +47,19 @@ public final class LLMState:  @MainActor LLMStatable {
     public internal(set) var toolRegistry: ToolRegistry
     var persistenceProvider: (any PersistenceProvider)?
 
-    public init(llmClient: LLMClient, toolRegistry: ToolRegistry = ToolRegistry(), persistenceProvider: PersistenceProvider?) {
+    /// 流式 chunk 写入 messages 的频率策略, 详见 `StreamPublishStrategy`。
+    public let streamPublishStrategy: StreamPublishStrategy
+
+    public init(
+        llmClient: LLMClient,
+        toolRegistry: ToolRegistry = ToolRegistry(),
+        persistenceProvider: PersistenceProvider?,
+        streamPublishStrategy: StreamPublishStrategy = .immediate
+    ) {
         self.llmClient = llmClient
         self.toolRegistry = toolRegistry
         self.persistenceProvider = persistenceProvider
+        self.streamPublishStrategy = streamPublishStrategy
         // 默认 approval handler 桥到 publisher 模式: AgentExecutor 调到这个 closure 时,
         // 内部 await 一个 continuation, 同时把 request 发布到 pendingApprovalRequest;
         // SwiftUI 看到字段变化弹 sheet, 用户点击后调 respondToApproval(_:), continuation

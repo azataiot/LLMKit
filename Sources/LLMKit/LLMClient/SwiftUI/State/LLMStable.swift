@@ -34,6 +34,11 @@ protocol LLMStatable: AnyObject {
     /// nil = 自动 approve (向后兼容)。客户端 closure 内部自己负责 UI、cancel 响应、跨会话持久化。
     var toolApprovalHandler: ToolApprovalHandler? { get set }
 
+    /// 流式 chunk 写入 conversation.messages 的频率策略。默认 `.immediate`。
+    /// 高频流式时把这个换成 `.throttled(0.033)` 可以把 UI 重渲染压到 ~30Hz, 降低 chat view body
+    /// 的 evaluate 频率。详见 `StreamPublishStrategy` 文档。
+    var streamPublishStrategy: StreamPublishStrategy { get }
+
     /// Computed property for backward compatibility
     var credits: Double { get }
     
@@ -95,6 +100,76 @@ internal func isUserCancellationError(_ error: Error) -> Bool {
     if error is CancellationError { return true }
     if let urlError = error as? URLError, urlError.code == .cancelled { return true }
     return false
+}
+
+// MARK: - Stream publish throttling
+
+/// 控制流式 chunk 写入 `conversation.messages` 的频率。
+///
+/// 上游 LLM 一秒可能发 20-30 个 chunk, 每个 chunk in-place update messages 会触发
+/// `LLMStateObject` / `LLMState` 的 objectWillChange, 进而让所有 observe llmState 的 view
+/// (典型场景: AIChatView body) 按这个频率重 evaluate。
+///
+/// 这个策略**不影响 LLMKit 内部行为** — `AgentExecutor` 有自己的 context 累加, 不读
+/// `conversation.messages` 中间态。仅决定"UI 投影"刷新频率。
+public enum StreamPublishStrategy: Sendable {
+    /// 默认: 每个 chunk 立即写入 messages, publish 频率 = 上游 chunk 频率。
+    /// 行为透明, 跟早期版本一致。
+    case immediate
+
+    /// 节流: 在窗口内 coalesce 多个 chunk, 窗口结束时按"最后一帧"flush 一次。
+    /// 推荐值: `0.033` (30Hz, 适合典型 chat UI), `0.016` (60Hz 对齐显示器), `0.1` (低频长聊天)。
+    /// 即便开了节流, 在 round 边界 / 流结束 / cancel 这些关键节点会强制 flush, 不会丢内容。
+    case throttled(TimeInterval)
+}
+
+/// 内部用的 coalescing 节流器。同 id 的 chunk 内容累积, "最后一帧" 覆盖前面 (因为 content 是
+/// 累积字符串, toolCalls 是累积数组, superset 关系天然成立)。
+/// `@MainActor` 保证 upsert 闭包跟 conversations 的修改在主线程一致。
+@MainActor
+final class StreamUpsertThrottler {
+    private let strategy: StreamPublishStrategy
+    private let upsert: (ChatMessageContent) -> Void
+
+    private var pending: ChatMessageContent?
+    private var flushTask: Task<Void, Never>?
+
+    init(
+        strategy: StreamPublishStrategy,
+        upsert: @escaping (ChatMessageContent) -> Void
+    ) {
+        self.strategy = strategy
+        self.upsert = upsert
+    }
+
+    /// 流式 chunk 进来时调用。`.immediate` 模式直跑 upsert; `.throttled` 模式收下作为 pending,
+    /// 起 flush task 等待窗口结束。窗口期间内再来的 chunk 覆盖 pending, flush task 不重置。
+    func update(_ content: ChatMessageContent) {
+        switch strategy {
+        case .immediate:
+            upsert(content)
+        case .throttled(let interval):
+            pending = content
+            if flushTask == nil {
+                flushTask = Task { @MainActor [weak self] in
+                    let nanos = UInt64(max(0, interval) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: nanos)
+                    self?.flushNow()
+                }
+            }
+        }
+    }
+
+    /// 强制立即 flush pending (如果有) 并清理 flush task。
+    /// 调用点: 进入 `.tool` 切换前 / loop 结束前 / catch 块里 — 保证关键节点 UI 不滞后。
+    func flushNow() {
+        flushTask?.cancel()
+        flushTask = nil
+        if let pending {
+            upsert(pending)
+            self.pending = nil
+        }
+    }
 }
 
 extension LLMStatable {
@@ -700,6 +775,24 @@ extension LLMStatable {
             // 避免每帧 chunk 触发 5 个 @Published 字段 publish 累积出 100+/s 的无谓信号。
         }
 
+        // upsertMessage 和 assistantThrottler 提到 do 块之外, 让 catch 块也能 flushNow,
+        // 保证 cancel/error 时 pending 的最后一帧不被节流窗口吞掉。
+        func upsertMessage(_ message: ChatMessage) {
+            guard let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
+                return
+            }
+            if let msgIdx = self.conversations.value![i].messages.firstIndex(where: { $0.id == message.id }) {
+                self.conversations.transform { $0[i].messages[msgIdx] = message }
+            } else {
+                self.conversations.transform { $0[i].messages.append(message) }
+            }
+        }
+        // 流式 assistant chunk 按 streamPublishStrategy 节流写入 messages。
+        // tool 消息 / final commit / cancel 兜底走"立即 flush + 立即 upsert"路径, 不被节流影响。
+        let assistantThrottler = StreamUpsertThrottler(strategy: self.streamPublishStrategy) { content in
+            upsertMessage(.content(content))
+        }
+
         do {
             // Upload files if any
             let conversationAfterUploading = try await llmClient.prepareUploadFiles(
@@ -748,22 +841,8 @@ extension LLMStatable {
             // 当前正在 stream 的 assistant 消息 id (UI 渲染光标 / 流式 indicator 时用)。
             var streamingAssistantID: String?
 
-            // 把消息写入 conversation.messages: 已存在同 id 就 in-place update,
-            // 否则 append。流式中也走这条路 — assistant chunk 第一条进来 append, 后续 chunk 原地刷。
-            // 旧实现里有"buffer 在 lastAssistantContent + 切 id 时 commit"的延迟方案,
-            // 用来减少数组变动频率。改成实时写之后, conversation.messages 就是单一数据源,
-            // UI 不再需要去 streamingStore 拼内容。SwiftUI 的 ForEach id-based diff 只重 evaluate 变化的那一行,
-            // 实测够用; 如果发现性能问题再回退。
-            func upsertMessage(_ message: ChatMessage) {
-                guard let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }) else {
-                    return
-                }
-                if let msgIdx = self.conversations.value![i].messages.firstIndex(where: { $0.id == message.id }) {
-                    self.conversations.transform { $0[i].messages[msgIdx] = message }
-                } else {
-                    self.conversations.transform { $0[i].messages.append(message) }
-                }
-            }
+            // upsertMessage / assistantThrottler 在 do 块外定义, 让 catch 块也能 flushNow。
+            // removeLoadingIfPresent 这里就近定义, 仅给流式 loop 内用。
 
             func removeLoadingIfPresent() {
                 if let i = self.conversations.value?.firstIndex(where: { $0.id == conversationID }),
@@ -795,18 +874,22 @@ extension LLMStatable {
 
                     switch content.role {
                     case .tool:
+                        // 切换流: tool 结果到达前, 把 assistant throttler 里 pending 的最后一帧
+                        // 强制 flush 进 messages — 保证 UI 看到 assistant 完整内容, 再看到 tool 卡片。
+                        assistantThrottler.flushNow()
                         // tool 结果到达说明前一条 assistant chunk 已经流完了, 把 streamState 标完成 —
                         // 否则在 tool 执行的这段空白里, isStreaming(prev assistant) 会假阳性。
                         // 下一轮 assistant 进来时 streamState 会被重新置 false (case .assistant 末尾)。
                         self.streamingStore.stream(for: conversationID).isFinished = true
                         streamingAssistantID = nil
-                        // tool 消息整条到来一次, 走 upsert (实际上几乎总是走 append 分支)。
+                        // tool 消息整条到来一次, 直接 upsert, 不进 throttler (节流是流式 assistant 专用)。
                         upsertMessage(.content(content))
 
                     case .assistant:
-                        // 流式中实时写: 第一个 chunk → append, 后续同 id chunk → in-place update。
+                        // 流式 chunk 进 throttler — `.immediate` 直接 upsert, `.throttled` 按窗口 coalesce。
+                        // 同 id chunk 后帧 superset 前帧 (content/toolCalls 是累积态), "最后一帧覆盖" 安全。
                         // settlement 之后的 chunk 会带 usage, 同样走 in-place 覆盖, 计费信息不丢。
-                        upsertMessage(.content(content))
+                        assistantThrottler.update(content)
                         streamingAssistantID = content.id
 
                         // streamState 只维护 (id + isFinished) 给 isStreaming() API 用。
@@ -827,6 +910,9 @@ extension LLMStatable {
                     }
                 }
             }
+
+            // 流式 loop 退出, 强制 flush throttler — 最后一帧 pending 不能被节流窗口吞掉。
+            await MainActor.run { assistantThrottler.flushNow() }
 
             // Cancel race: stream 可能在 inner task 还没消费下一个 chunk 时被打断 finish()
             // 而非 finish(throwing:), 这时下面的 guard 会拿到空 responseMessage 抛"No response"。
@@ -882,6 +968,10 @@ extension LLMStatable {
                 }
             }
         } catch {
+            // 先 flush throttler pending — 即便 cancel/error, 节流窗口里最后一帧的内容也要落到 messages,
+            // 否则 partial assistant 内容截止时间会是"最后一次 flush" 而非"cancel 那一刻", 短少 0-N ms 内容。
+            await MainActor.run { assistantThrottler.flushNow() }
+
             if let loaddingMessageIndex = conversations.value![index].messages.firstIndex(where: {$0.id == loadingResponseMessage.id}) {
                 await MainActor.run {
                     self.conversations.transform {

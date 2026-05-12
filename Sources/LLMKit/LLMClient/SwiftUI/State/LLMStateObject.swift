@@ -45,10 +45,19 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
     public internal(set) var toolRegistry: ToolRegistry
     var persistenceProvider: (any PersistenceProvider)?
 
-    public init(llmClient: LLMClient, toolRegistry: ToolRegistry = ToolRegistry(), persistenceProvider: PersistenceProvider?) {
+    /// 流式 chunk 写入 messages 的频率策略, 详见 `StreamPublishStrategy`。
+    public let streamPublishStrategy: StreamPublishStrategy
+
+    public init(
+        llmClient: LLMClient,
+        toolRegistry: ToolRegistry = ToolRegistry(),
+        persistenceProvider: PersistenceProvider?,
+        streamPublishStrategy: StreamPublishStrategy = .immediate
+    ) {
         self.llmClient = llmClient
         self.toolRegistry = toolRegistry
         self.persistenceProvider = persistenceProvider
+        self.streamPublishStrategy = streamPublishStrategy
         // 默认 approval handler 桥到 publisher 模式 (详见 LLMState.init 同段注释)。
         self.toolApprovalHandler = nil
         self.toolApprovalHandler = { [weak self] request in
