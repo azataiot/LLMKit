@@ -22,8 +22,8 @@ import LLMCore
 
 extension LLMClient {
     /// 拉取一个 domain agent 的客户端可见配置 (defaultModel + allowedModels)。
-    /// 没登录 / 没余额时服务端返回 401 / 402, 由 networking 层抛错。
+    /// 这是公共只读配置端点, 不要求 auth, 不触发 LLM 调用, 不扣 credits。
     public func getDomainAgentConfig(agentID: String) async throws -> DomainAgentConfigResponse {
-        try await networking.get("/domain-agents/\(agentID)/config")
+        try await networking.get("/domain-agents/config/\(agentID)")
     }
 }

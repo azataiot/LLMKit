@@ -76,6 +76,8 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
 
     var inflightTasks: [String: Task<Void, Error>] = [:]
 
+    @Published public internal(set) var runningConversationIDs: Set<String> = []
+
     /// 当前等待 approval 的请求。SwiftUI 用 `.sheet(item: ...)` 监听 (用 ObservedObject 投影)。
     @Published public internal(set) var pendingApprovalRequest: ToolApprovalRequest?
 
@@ -113,11 +115,29 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
         self._cancelGeneration(conversationID: conversationID)
     }
 
-    /// 这条 message 是不是 conversation 里当前正在 stream 的那一条 (token 还在陆续到达)。
-    /// agent 多轮场景里只对"当前那一轮"为 true; 中间已流完等 tool 执行的那条会被自动标完成 (false)。
-    /// 整个 agent loop 收尾或失败之后, 任意 messageID 都返回 false。
+    /// 这条 message 是不是 conversation 里当前正在接收 assistant token。
+    /// 这是 message-level 状态, 只适合渲染某条 assistant bubble 的光标/打字态。
+    /// tool call 执行、approval 等待、两轮 agent request 间隙都不会让某条 message 保持 streaming;
+    /// 判断整条 run 是否仍在进行用 `isRunning(conversationID:)`。
     public func isStreaming(messageID: String, in conversationID: String) -> Bool {
         self._isStreaming(messageID: messageID, in: conversationID)
+    }
+
+    /// 这个 conversation 当前是否有一条 LLM run 在进行中。
+    /// `sendMessage` 路径中, 新 user message 已经插入到 `conversation.messages` 后才会变为 true。
+    /// `resumeGeneration` 路径中, 尾部 `.error` stub 已经清理后才会变为 true。
+    /// true 覆盖整条 run: token streaming、tool call 执行、approval 等待、下一轮 agent request 间隙。
+    /// 结束、取消或失败清理后变回 false。
+    public func isRunning(conversationID: String) -> Bool {
+        self._isRunning(conversationID: conversationID)
+    }
+
+    /// 估算指定 conversation 当前活跃上下文消耗的 token 数 (保守启发式, 不是 tokenizer 精确值)。
+    /// 跟 `model.maxContextTokens` 对比, 用于 UI 进度条 / 预防性 compact 触发。
+    /// **真正防溢出靠 LLMKit 内置的反应式兜底** — 上游报 context overflow 会自动 compact + 重试,
+    /// 不需要客户端拿这个估算做精确门槛。
+    public func estimatedTokenUsage(in conversationID: String) -> Int {
+        self._estimatedTokenUsage(in: conversationID)
     }
 
     /// 把会话截断到指定 message。inclusive=true 连同 fromMessageID 自身一起删, false 只删它之后的。
@@ -160,7 +180,7 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
         try await self._handlePurchase(verificationResult: verificationResult)
 
     }
-    
+
     public func configurePersistenceProvider(_ provider: PersistenceProvider) {
         self._configurePersistenceProvider(provider)
     }
@@ -240,8 +260,7 @@ public final class LLMStateObject: ObservableObject, @MainActor LLMStatable {
         }
     }
 
-    /// 程序错误后让 agent 在现有历史上接着跑。会先把末尾的 `.error` stub 删掉, 然后跑一轮新的 agent loop。
-    /// 末尾不是 `.error` 的对话上调用会抛错 (UI 不该让用户在没失败的对话上点这个)。
+    /// 让 agent 在现有历史上接着跑。会先清掉尾部连续的 `.error` stub, 然后跑一轮新的 agent loop。
     public func resumeGeneration<Metadata: Codable & Equatable & Sendable>(
         in conversationID: String,
         model: SupportedModel,

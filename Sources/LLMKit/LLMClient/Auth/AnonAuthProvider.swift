@@ -36,6 +36,12 @@ struct AnonAuthProvider {
 
 
 struct AnonIdentityManager {
+    static func loadAnonID(for bundleID: String) -> String? {
+        let keychainService = "com.chocoford.llmkit.\(bundleID)"
+        let anonKey = "anon.uuid"
+        return readKeychain(service: keychainService, key: anonKey)
+    }
+
     static func loadOrCreateAnonID(for bundleID: String) -> String {
         let keychainService = "com.chocoford.llmkit.\(bundleID)"
         let anonKey = "anon.uuid"

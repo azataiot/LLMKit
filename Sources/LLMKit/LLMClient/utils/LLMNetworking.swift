@@ -22,11 +22,11 @@ public actor LLMNetworking {
     public init(
         session: URLSession = .shared
     ) {
-//#if DEBUG
+#if DEBUG
         self.baseURL = URL(string: "http://127.0.0.1:8080")!
-//#else
-//        self.baseURL = URL(string: "https://llm.chocoford.com")!
-//#endif
+#else
+        self.baseURL = URL(string: "https://llm.chocoford.com")!
+#endif
         self.session = session
     }
     

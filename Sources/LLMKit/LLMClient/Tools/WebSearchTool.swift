@@ -10,6 +10,7 @@ import LLMCore
 
 public struct WebSearchTool: Tool {
     public let name: String
+    public let displayName: String
     public let description: String
     public let inputSchema: ToolInputSchema
 
@@ -18,9 +19,11 @@ public struct WebSearchTool: Tool {
     public init(
         client: LLMClient,
         name: String = "web_search",
+        displayName: String = "Web Search",
         description: String = "Search the web for up-to-date information."
     ) {
         self.name = name
+        self.displayName = displayName
         self.description = description
         self.networking = client.networking
         self.inputSchema = .parameters(ToolParameters(
