@@ -33,7 +33,15 @@ extension LLMClient {
         for (i, file) in files.enumerated() {
             switch file {
             case .image(let url) where url.isFileURL:
-                guard let data = try? Data(contentsOf: url) else { continue }
+                guard let data = try? Data(contentsOf: url) else {
+                    throw NSError(
+                        domain: "LLMKit.FileUpload",
+                        code: 1,
+                        userInfo: [
+                            NSLocalizedDescriptionKey: "Local file is not readable: \(url.path)"
+                        ]
+                    )
+                }
                 let mime = Self.inferMimeType(from: url)
                 if canUpload {
                     pending.append(Pending(index: i, data: data, mime: mime))
@@ -87,6 +95,14 @@ extension LLMClient {
 
         message.files = newFiles
         return message
+    }
+
+    func prepareUploadFiles(for messages: [ChatMessageContent]) async throws -> [ChatMessageContent] {
+        var messages = messages
+        for index in messages.indices {
+            messages[index] = try await prepareUploadFiles(for: messages[index])
+        }
+        return messages
     }
     
     func prepareUploadFiles(for message: ChatMessage) async throws -> ChatMessage {

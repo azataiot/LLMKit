@@ -19,17 +19,19 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> APIResponse<ChatMessageContent> {
+        let preparedMessages = try await prepareUploadFiles(for: (
+            system == nil ? [] : [
+                .init(role: .system, content: system!),
+            ]
+        ) + [
+            .init(role: .user, content: text)
+        ])
+
         try await networking.post(
             "/chat",
             body: ChatRequest(
                 model: model,
-                messages: (
-                    system == nil ? [] : [
-                        .init(role: .system, content: system!),
-                    ]
-                ) + [
-                    .init(role: .user, content: text)
-                ],
+                messages: preparedMessages,
                 metadata: metadata,
                 agentID: agentID,
                 tools: tools
@@ -44,9 +46,11 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> APIResponse<ChatMessageContent> {
+        let preparedMessages = try await prepareUploadFiles(for: messages)
+
         try await networking.post(
             "/chat",
-            body: ChatRequest(model: model, messages: messages, metadata: metadata, agentID: agentID, tools: tools)
+            body: ChatRequest(model: model, messages: preparedMessages, metadata: metadata, agentID: agentID, tools: tools)
         )
     }
 
@@ -58,15 +62,17 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
+        let preparedMessages = try await prepareUploadFiles(for: (
+            system == nil ? [] : [
+                .init(role: .system, content: system!),
+            ]
+        ) + [
+            .init(role: .user, content: text)
+        ])
+
         try await networking.stream("/chat/stream", body: ChatRequest(
             model: model,
-            messages: (
-                system == nil ? [] : [
-                    .init(role: .system, content: system!),
-                ]
-            ) + [
-                .init(role: .user, content: text)
-            ],
+            messages: preparedMessages,
             metadata: metadata,
             agentID: agentID,
             tools: tools
@@ -80,7 +86,9 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
-        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: messages, metadata: metadata, agentID: agentID, tools: tools))
+        let preparedMessages = try await prepareUploadFiles(for: messages)
+
+        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: preparedMessages, metadata: metadata, agentID: agentID, tools: tools))
     }
     
 //    public func streamChat(
