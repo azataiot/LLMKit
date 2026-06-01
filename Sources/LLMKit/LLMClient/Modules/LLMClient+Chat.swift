@@ -27,7 +27,7 @@ extension LLMClient {
             .init(role: .user, content: text)
         ])
 
-        try await networking.post(
+        return try await networking.post(
             "/chat",
             body: ChatRequest(
                 model: model,
@@ -48,7 +48,7 @@ extension LLMClient {
     ) async throws -> APIResponse<ChatMessageContent> {
         let preparedMessages = try await prepareUploadFiles(for: messages)
 
-        try await networking.post(
+        return try await networking.post(
             "/chat",
             body: ChatRequest(model: model, messages: preparedMessages, metadata: metadata, agentID: agentID, tools: tools)
         )
@@ -70,7 +70,7 @@ extension LLMClient {
             .init(role: .user, content: text)
         ])
 
-        try await networking.stream("/chat/stream", body: ChatRequest(
+        return try await networking.stream("/chat/stream", body: ChatRequest(
             model: model,
             messages: preparedMessages,
             metadata: metadata,
@@ -88,7 +88,7 @@ extension LLMClient {
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
         let preparedMessages = try await prepareUploadFiles(for: messages)
 
-        try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: preparedMessages, metadata: metadata, agentID: agentID, tools: tools))
+        return try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: preparedMessages, metadata: metadata, agentID: agentID, tools: tools))
     }
     
 //    public func streamChat(
