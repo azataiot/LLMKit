@@ -125,6 +125,25 @@ extension LLMClient {
         return conversation
     }
 
+    func prepareUploadFilesForActiveContext(for conversation: Conversation) async throws -> Conversation {
+        var conversation = conversation
+        let preparedContextMessages = try await prepareUploadFiles(for: conversation.messages.contextMessages)
+        var contextIndex = preparedContextMessages.startIndex
+
+        for messageIndex in conversation.messages.indices {
+            guard contextIndex < preparedContextMessages.endIndex else { break }
+            guard case .content(let content) = conversation.messages[messageIndex],
+                  !content.isCompactedOut else {
+                continue
+            }
+
+            conversation.messages[messageIndex] = .content(preparedContextMessages[contextIndex])
+            contextIndex = preparedContextMessages.index(after: contextIndex)
+        }
+
+        return conversation
+    }
+
     /// 按文件后缀推 mime type, 不识别的兜底成 image/png (跟现有 base64 解析的兜底一致)。
     private static func inferMimeType(from url: URL) -> String {
         switch url.pathExtension.lowercased() {

@@ -92,8 +92,10 @@ extension LLMStatable {
         }
 
         do {
-            // Upload files if any
-            let conversationAfterUploading = try await llmClient.prepareUploadFiles(
+            // Upload/inline only the active context that will be sent to the model.
+            // Compacted-out historical messages may contain stale local file URLs; they are not
+            // part of contextMessages, so they must not fail the current run.
+            let conversationAfterUploading = try await llmClient.prepareUploadFilesForActiveContext(
                 for: self.conversations.value![index]
             )
 
@@ -116,7 +118,7 @@ extension LLMStatable {
             }
 
             logger.info("Running agent loop for conversation \(conversationID), model: \(model.rawValue), stream: \(stream), canStream: \(canStream)")
-            for message in self.conversations.value![index].messages.contentMessages {
+            for message in self.conversations.value![index].messages.contextMessages {
                 logger.info("- \(String(describing: message).prefix(1024))")
             }
             logger.info("Running agent loop end")
