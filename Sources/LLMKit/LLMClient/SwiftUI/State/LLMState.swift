@@ -248,6 +248,33 @@ public final class LLMState:  @MainActor LLMStatable {
         }
     }
 
+    #if DEBUG
+    /// Returns the context that would be sent for this `sendMessage` call without starting a run.
+    ///
+    /// The method simulates the `sendMessage` append step on a local copy, then returns the active
+    /// `contextMessages` that AgentExecutor would receive. It does not mutate conversations, set
+    /// `isRunning`, call the server, deduct credits, or persist anything.
+    ///
+    /// Default `activeContextOnly` mode has no upload side effects. Use `preparedForSend` only when
+    /// you need to inspect the post-upload/post-inline file representation; with an uploader
+    /// configured, that mode can upload files.
+    public func debugChatContext(
+        to conversationID: String,
+        model: SupportedModel,
+        message: ChatMessage,
+        stream: Bool = true,
+        filePreparationMode: DebugChatContextFilePreparationMode = .activeContextOnly
+    ) async throws -> DebugChatContextSnapshot {
+        try await self._debugChatContext(
+            to: conversationID,
+            model: model,
+            message: message,
+            stream: stream,
+            filePreparationMode: filePreparationMode
+        )
+    }
+    #endif
+
     public func regenerateMessage<Metadata: Codable & Equatable & Sendable>(
         in conversationID: String,
         fromMessageID: String,
