@@ -7,7 +7,7 @@ let package = Package(
     name: "LLMKit",
     platforms: [
         .macOS(.v12),
-        .iOS(.v15),
+        .iOS(.v16),
         .tvOS(.v15),
         .watchOS(.v6),
         .visionOS(.v1)
