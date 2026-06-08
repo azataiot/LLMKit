@@ -32,6 +32,24 @@ public final class LLMClient: Sendable {
         self.uploader = uploadProvider
         self.uploadPolicy = uploadPolicy
     }
+
+    #if DEBUG
+    public init(
+        authProvider: LLMAuthProvider,
+        uploadProvider: (any LLMFileUploadProvider)? = nil,
+        uploadPolicy: LLMUploadPolicy? = nil,
+        baseURL: URL
+    ) {
+        self.networking = LLMNetworking(baseURL: baseURL)
+        let authStateChangedPublisher = PassthroughSubject<Bool, Never>()
+        self.authManager = LLMAuthManager(provider: authProvider) {
+            authStateChangedPublisher.send($0)
+        }
+        self.authStateChangedPublisher = authStateChangedPublisher
+        self.uploader = uploadProvider
+        self.uploadPolicy = uploadPolicy
+    }
+    #endif
     
     public init(
         authProvider: any LLMAuthProviderBuilder,
@@ -49,6 +67,26 @@ public final class LLMClient: Sendable {
         self.uploader = uploadProvider?(self.networking)
         self.uploadPolicy = uploadPolicy
     }
+
+    #if DEBUG
+    public init(
+        authProvider: any LLMAuthProviderBuilder,
+        uploadProvider: (any LLMFileUploadProviderBuilder)? = nil,
+        uploadPolicy: LLMUploadPolicy? = nil,
+        baseURL: URL
+    ) {
+        self.networking = LLMNetworking(baseURL: baseURL)
+        let authStateChangedPublisher = PassthroughSubject<Bool, Never>()
+        self.authManager = LLMAuthManager(provider: authProvider(self.networking)) { isAuthenticated in
+            DispatchQueue.main.async {
+                authStateChangedPublisher.send(isAuthenticated)
+            }
+        }
+        self.authStateChangedPublisher = authStateChangedPublisher
+        self.uploader = uploadProvider?(self.networking)
+        self.uploadPolicy = uploadPolicy
+    }
+    #endif
     
     init() {
         self.networking = LLMNetworking()

@@ -29,6 +29,16 @@ public actor LLMNetworking {
 #endif
         self.session = session
     }
+
+    #if DEBUG
+    public init(
+        baseURL: URL,
+        session: URLSession = .shared
+    ) {
+        self.baseURL = baseURL
+        self.session = session
+    }
+    #endif
     
     let jsonDecoder = {
         let decoder = JSONDecoder()
