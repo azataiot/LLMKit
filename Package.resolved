@@ -1,5 +1,5 @@
 {
-  "originHash" : "83b03d733ff8a2146cbe8c963ca31cb5ff534b0e145d149454439aa50ecc652b",
+  "originHash" : "56dd968f6f29868791c205f00139683d1ababd7689a255bdf206bc7843f6444f",
   "pins" : [
     {
       "identity" : "alerttoast",
@@ -25,7 +25,7 @@
       "location" : "https://github.com/chocoford/ChocofordKit.git",
       "state" : {
         "branch" : "main",
-        "revision" : "d0b7e6b90eac918cbcecd29b9d2c01d499411afc"
+        "revision" : "bbf92c4411803a322c7fca95782449186e23c2df"
       }
     },
     {
@@ -43,7 +43,7 @@
       "location" : "https://github.com/chocoford/LLMCore.git",
       "state" : {
         "branch" : "main",
-        "revision" : "a7b77fe11b339b1b84b2530b7660eaec5b7eaf1a"
+        "revision" : "4efd3eb92f2d348a01cdb1ac56e926ad4d33f11d"
       }
     },
     {
@@ -52,7 +52,7 @@
       "location" : "https://github.com/MacPaw/OpenAI.git",
       "state" : {
         "branch" : "main",
-        "revision" : "c9342438e70e6c9a93d09220a8855459deaba00a"
+        "revision" : "35ff1a5a95182c3c809209334d3076eb08134411"
       }
     },
     {
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/SFSafeSymbols/SFSafeSymbols.git",
       "state" : {
-        "revision" : "3dd282d3269b061853a3b3bcd23a509d2aa166ce",
-        "version" : "6.2.0"
+        "revision" : "e01b3d4f861412f8dcee8d93c417d2c2b0cdfd77",
+        "version" : "7.0.0"
       }
     },
     {
@@ -96,8 +96,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-log.git",
       "state" : {
-        "revision" : "a012e0ad8a8a72de92b0e008c81a9b793f70e73a",
-        "version" : "1.12.1"
+        "revision" : "92448c359f00ebe36ae97d3bd9086f13c7692b5a",
+        "version" : "1.13.2"
       }
     },
     {
