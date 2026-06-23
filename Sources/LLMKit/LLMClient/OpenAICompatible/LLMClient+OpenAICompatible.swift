@@ -35,6 +35,10 @@ extension LLMClient {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.checkStatus(response, bytes: nil)
 
+                    // Stable id for the whole streamed response. AgentExecutor.merge does
+                    // `existing.id = chunk.id`, and the UI coalesces same-id chunks — a per-chunk
+                    // id would make every chunk look like a new message and break the chat.
+                    let messageID = UUID().uuidString
                     var content = ""
                     // tool-call deltas accumulate by index: (id, name, arguments)
                     var toolAccum: [Int: (id: String, name: String, args: String)] = [:]
@@ -61,7 +65,11 @@ extension LLMClient {
                         }
 
                         let toolCalls = Self.buildToolCalls(toolAccum)
+                        // Skip pure-reasoning chunks (no content, no tool calls yet) to avoid churn.
+                        if content.isEmpty && toolCalls.isEmpty { continue }
+
                         let msg = ChatMessageContent(
+                            id: messageID,
                             role: .assistant,
                             content: content.isEmpty ? nil : content,
                             toolCalls: toolCalls.isEmpty ? nil : toolCalls
