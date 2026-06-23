@@ -15,7 +15,10 @@ public final class LLMClient: Sendable {
     internal let networking: LLMNetworking
     internal let uploader: (any LLMFileUploadProvider)?
     internal let uploadPolicy: LLMUploadPolicy?
-    
+    /// When non-nil, the client bypasses the hosted LLMServer and talks directly to a
+    /// user-supplied OpenAI-compatible endpoint; credits/auth become inert.
+    internal let openAIConfig: OpenAICompatibleConfig?
+
     private let logger = Logger(label: "LLMClient")
     
     public init(
@@ -31,6 +34,7 @@ public final class LLMClient: Sendable {
         self.authStateChangedPublisher = authStateChangedPublisher
         self.uploader = uploadProvider
         self.uploadPolicy = uploadPolicy
+        self.openAIConfig = nil
     }
 
     #if DEBUG
@@ -48,6 +52,7 @@ public final class LLMClient: Sendable {
         self.authStateChangedPublisher = authStateChangedPublisher
         self.uploader = uploadProvider
         self.uploadPolicy = uploadPolicy
+        self.openAIConfig = nil
     }
     #endif
     
@@ -66,6 +71,7 @@ public final class LLMClient: Sendable {
         self.authStateChangedPublisher = authStateChangedPublisher
         self.uploader = uploadProvider?(self.networking)
         self.uploadPolicy = uploadPolicy
+        self.openAIConfig = nil
     }
 
     #if DEBUG
@@ -85,6 +91,7 @@ public final class LLMClient: Sendable {
         self.authStateChangedPublisher = authStateChangedPublisher
         self.uploader = uploadProvider?(self.networking)
         self.uploadPolicy = uploadPolicy
+        self.openAIConfig = nil
     }
     #endif
     
@@ -97,6 +104,20 @@ public final class LLMClient: Sendable {
         self.authStateChangedPublisher = authStateChangedPublisher
         self.uploader = nil
         self.uploadPolicy = nil
+        self.openAIConfig = nil
+    }
+
+    /// Create a client that talks directly to a user-supplied OpenAI-compatible endpoint.
+    public init(openAICompatible config: OpenAICompatibleConfig) {
+        self.networking = LLMNetworking()
+        let authStateChangedPublisher = PassthroughSubject<Bool, Never>()
+        self.authManager = LLMAuthManager(provider: NoAuthProvider()) {
+            authStateChangedPublisher.send($0)
+        }
+        self.authStateChangedPublisher = authStateChangedPublisher
+        self.uploader = nil
+        self.uploadPolicy = nil
+        self.openAIConfig = config
     }
     
     internal let authStateChangedPublisher: PassthroughSubject<Bool, Never>
@@ -107,6 +128,7 @@ public final class LLMClient: Sendable {
     /// This method is suitable for app launch / cold start. It should not be treated as a
     /// foreground polling hook.
     public func restore() async {
+        if openAIConfig != nil { return }
         await authManager.restore()
 
         if await authManager.isAuthenticated {
@@ -171,6 +193,10 @@ public final class LLMClient: Sendable {
     /// Get LLM credits information, including total balance, periodic credits, and purchased credits.
     @discardableResult
     public func getCredits() async throws -> CreditsInfo {
+        if openAIConfig != nil {
+            // No credits concept in custom mode; do not publish so the app's creditsInfo stays nil.
+            return CreditsInfo(balance: 1_000_000, periodicCredits: nil, purchasedCredits: 0)
+        }
         let response: CreditsInfo = try await self.networking.get("/credits")
         // 更新全局状态
         DispatchQueue.main.async {

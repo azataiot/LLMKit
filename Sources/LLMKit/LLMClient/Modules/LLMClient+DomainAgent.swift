@@ -26,6 +26,23 @@ extension LLMClient {
     /// 新客户端优先使用 `modelProfiles`; `defaultModel` / `allowedModels` 仅作为老客户端 fallback。
     /// 这是公共只读配置端点, 不要求 auth, 不触发 LLM 调用, 不扣 credits。
     public func getDomainAgentConfig(agentID: String) async throws -> DomainAgentConfigResponse {
-        try await networking.get("/domain-agents/config/\(agentID)")
+        if let cfg = openAIConfig {
+            let model = SupportedModel(rawValue: cfg.model)
+            let profile = DomainModelProfile(
+                id: "custom",
+                model: model,
+                rank: 0,
+                isVisible: true,
+                requirements: .init(),
+                capabilities: .init(supportsImageInput: true, maxContextTokens: nil)
+            )
+            return DomainAgentConfigResponse(
+                defaultModel: model,
+                allowedModels: [model],
+                modelProfiles: [profile],
+                defaultModelProfileID: "custom"
+            )
+        }
+        return try await networking.get("/domain-agents/config/\(agentID)")
     }
 }

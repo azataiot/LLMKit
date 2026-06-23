@@ -19,6 +19,13 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> APIResponse<ChatMessageContent> {
+        if let cfg = openAIConfig {
+            return try await chatOpenAICompatible(
+                system: system ?? cfg.systemPrompt,
+                messages: [.init(role: .user, content: text)],
+                tools: tools
+            )
+        }
         let preparedMessages = try await prepareUploadFiles(for: (
             system == nil ? [] : [
                 .init(role: .system, content: system!),
@@ -46,6 +53,9 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> APIResponse<ChatMessageContent> {
+        if let cfg = openAIConfig {
+            return try await chatOpenAICompatible(system: cfg.systemPrompt, messages: messages, tools: tools)
+        }
         let preparedMessages = try await prepareUploadFiles(for: messages)
 
         return try await networking.post(
@@ -62,6 +72,13 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
+        if let cfg = openAIConfig {
+            return try await streamChatOpenAICompatible(
+                system: system ?? cfg.systemPrompt,
+                messages: [.init(role: .user, content: text)],
+                tools: tools
+            )
+        }
         let preparedMessages = try await prepareUploadFiles(for: (
             system == nil ? [] : [
                 .init(role: .system, content: system!),
@@ -86,6 +103,9 @@ extension LLMClient {
         agentID: String? = nil,
         tools: [ToolSchema]? = nil
     ) async throws -> AsyncThrowingStream<StreamChatResponse, Error> {
+        if let cfg = openAIConfig {
+            return try await streamChatOpenAICompatible(system: cfg.systemPrompt, messages: messages, tools: tools)
+        }
         let preparedMessages = try await prepareUploadFiles(for: messages)
 
         return try await networking.stream("/chat/stream", body: ChatRequest(model: model, messages: preparedMessages, metadata: metadata, agentID: agentID, tools: tools))
